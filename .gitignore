@@ -209,3 +209,5 @@ __marimo__/
 *.pyc
 scheduler.db
 *.sqlite3
+data/browser-profile/
+data/bot-error.png
