@@ -62,7 +62,7 @@ def load_env_file(env_path: str = ".env") -> None:
             key = key.strip()
             value = strip_env_quotes(value)
 
-            if key and key not in os.environ:
+            if key:
                 os.environ[key] = value
 
 
