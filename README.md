@@ -4,7 +4,7 @@ Simple Python tool for scheduling Facebook page posts using SQLite and the Meta 
 
 ## Features
 - Schedule Facebook page posts locally
-- Attach one image or video to a scheduled post
+- Attach one or more images, or one video, to a scheduled post
 - Store posts in SQLite
 - Publish automatically when due
 - Retry failed posts
@@ -61,10 +61,16 @@ python app.py add "Hello Facebook" "2026-04-14 18:30:00" --comment "First commen
 ```
 
 ## Add An Image Post
-Use a local file path or a public `https://` image URL.
+Use one or more local file paths or public `https://` image URLs.
 
 ```bash
 python app.py add-image "Photo caption" "2026-04-14 18:30:00" media/photo.jpg
+```
+
+Multiple images are published as one multi-photo Facebook post:
+
+```bash
+python app.py add-image "Photo caption" "2026-04-14 18:30:00" media/photo-1.jpg media/photo-2.jpg
 ```
 
 You can also let the scheduler detect the media type from the file extension:
@@ -72,6 +78,8 @@ You can also let the scheduler detect the media type from the file extension:
 ```bash
 python app.py add "Photo caption" "2026-04-14 18:30:00" media/photo.jpg
 ```
+
+For multiple images with the desktop app, select more than one image in the file picker or enter one path or URL per line. Videos remain single-file posts.
 
 First comments require a Page token that can manage Page engagement.
 

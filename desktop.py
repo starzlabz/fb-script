@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QTableWidget,
     QTableWidgetItem,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -77,60 +76,68 @@ class SchedulerDesktopApp(QMainWindow):
         main_layout.addLayout(content_layout, 1)
 
         form_box = QGroupBox("Schedule Post")
-        form_box.setMinimumWidth(360)
-        form_box.setMinimumHeight(680)
-        form_layout = QGridLayout(form_box)
-        form_layout.setColumnStretch(0, 1)
+        form_box.setMinimumWidth(390)
+        form_layout = QVBoxLayout(form_box)
+        form_layout.setContentsMargins(14, 18, 14, 14)
+        form_layout.setSpacing(8)
 
-        form_layout.addWidget(QLabel("Message"), 0, 0, 1, 3)
-        self.message_input = QTextEdit()
-        self.message_input.setAcceptRichText(False)
+        form_layout.addWidget(QLabel("Message"))
+        self.message_input = QPlainTextEdit()
         self.message_input.setPlaceholderText("Write the post text or caption")
         self.message_input.setFixedHeight(150)
-        form_layout.addWidget(self.message_input, 1, 0, 1, 3)
+        form_layout.addWidget(self.message_input)
 
-        form_layout.addWidget(QLabel("First Comment"), 2, 0, 1, 3)
-        self.first_comment_input = QTextEdit()
-        self.first_comment_input.setAcceptRichText(False)
+        form_layout.addWidget(QLabel("First Comment"))
+        self.first_comment_input = QPlainTextEdit()
         self.first_comment_input.setPlaceholderText("Optional first comment")
         self.first_comment_input.setFixedHeight(100)
-        form_layout.addWidget(self.first_comment_input, 3, 0, 1, 3)
+        form_layout.addWidget(self.first_comment_input)
 
-        form_layout.addWidget(QLabel("Scheduled At"), 4, 0, 1, 3)
+        form_layout.addWidget(QLabel("Scheduled At"))
+        schedule_row = QHBoxLayout()
+        schedule_row.setSpacing(8)
         self.scheduled_at_input = QLineEdit(self.default_schedule_time())
         self.scheduled_at_input.setPlaceholderText("YYYY-MM-DD HH:MM:SS")
-        form_layout.addWidget(self.scheduled_at_input, 5, 0)
+        schedule_row.addWidget(self.scheduled_at_input, 1)
 
         one_hour_button = QPushButton("+1 Hour")
         one_hour_button.clicked.connect(self.set_one_hour_later)
-        form_layout.addWidget(one_hour_button, 5, 1)
+        schedule_row.addWidget(one_hour_button)
 
         now_button = QPushButton("Now")
         now_button.clicked.connect(self.set_now)
-        form_layout.addWidget(now_button, 5, 2)
+        schedule_row.addWidget(now_button)
+        form_layout.addLayout(schedule_row)
 
-        form_layout.addWidget(QLabel("Media Path or URL"), 6, 0, 1, 3)
-        self.media_path_input = QLineEdit()
-        self.media_path_input.setPlaceholderText("Optional image/video file or public URL")
-        form_layout.addWidget(self.media_path_input, 7, 0, 1, 2)
+        form_layout.addWidget(QLabel("Media Paths or URLs"))
+        media_row = QHBoxLayout()
+        media_row.setSpacing(8)
+        self.media_path_input = QPlainTextEdit()
+        self.media_path_input.setPlaceholderText("Optional image/video file or public URL, one per line")
+        self.media_path_input.setFixedHeight(76)
+        media_row.addWidget(self.media_path_input, 1)
 
         browse_button = QPushButton("Browse")
         browse_button.clicked.connect(self.browse_media)
-        form_layout.addWidget(browse_button, 7, 2)
+        media_row.addWidget(browse_button)
+        form_layout.addLayout(media_row)
 
-        form_layout.addWidget(QLabel("Media Type"), 8, 0, 1, 3)
+        form_layout.addWidget(QLabel("Media Type"))
         self.media_type_input = QComboBox()
         self.media_type_input.addItems(["Auto", "Image", "Video"])
-        form_layout.addWidget(self.media_type_input, 9, 0)
+        form_layout.addWidget(self.media_type_input)
 
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(8)
         schedule_button = QPushButton("Schedule")
         schedule_button.clicked.connect(self.schedule_post)
         schedule_button.setMinimumHeight(36)
-        form_layout.addWidget(schedule_button, 10, 0, 1, 2)
+        actions_row.addWidget(schedule_button, 1)
 
         clear_button = QPushButton("Clear")
         clear_button.clicked.connect(self.clear_form)
-        form_layout.addWidget(clear_button, 10, 2)
+        actions_row.addWidget(clear_button)
+        form_layout.addLayout(actions_row)
 
         scheduler_box = QGroupBox("Scheduler")
         scheduler_layout = QGridLayout(scheduler_box)
@@ -148,12 +155,12 @@ class SchedulerDesktopApp(QMainWindow):
         self.stop_button.setEnabled(False)
         scheduler_layout.addWidget(self.stop_button, 1, 1)
 
-        form_layout.addWidget(scheduler_box, 11, 0, 1, 3)
-        form_layout.setRowStretch(12, 1)
+        form_layout.addWidget(scheduler_box)
+        form_layout.addStretch(1)
 
         form_scroll = QScrollArea()
         form_scroll.setWidgetResizable(True)
-        form_scroll.setMinimumWidth(390)
+        form_scroll.setMinimumWidth(420)
         form_scroll.setWidget(form_box)
         content_layout.addWidget(form_scroll)
 
@@ -236,34 +243,45 @@ class SchedulerDesktopApp(QMainWindow):
         self.scheduled_at_input.setText(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
     def browse_media(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self,
             "Select media",
             "",
             "Media files (*.jpg *.jpeg *.png *.gif *.tif *.tiff *.bmp *.mp4 *.mov *.m4v *.avi *.webm *.mkv *.mpeg *.mpg *.wmv *.flv);;Images (*.jpg *.jpeg *.png *.gif *.tif *.tiff *.bmp);;Videos (*.mp4 *.mov *.m4v *.avi *.webm *.mkv *.mpeg *.mpg *.wmv *.flv);;All files (*.*)",
         )
-        if not path:
+        if not paths:
             return
 
-        self.media_path_input.setText(path)
+        self.media_path_input.setPlainText("\n".join(paths))
         try:
-            detected = scheduler.detect_media_type(path)
-            self.media_type_input.setCurrentText(detected.capitalize())
+            detected_types = {scheduler.detect_media_type(path) for path in paths}
+            if len(paths) > 1:
+                self.media_type_input.setCurrentText("Image" if detected_types == {"image"} else "Auto")
+            else:
+                self.media_type_input.setCurrentText(next(iter(detected_types)).capitalize())
         except ValueError:
             self.media_type_input.setCurrentText("Auto")
+
+    def media_paths_from_input(self) -> list[str]:
+        return [
+            path.strip()
+            for path in self.media_path_input.toPlainText().splitlines()
+            if path.strip()
+        ]
 
     def schedule_post(self) -> None:
         message = self.message_input.toPlainText().strip()
         first_comment = self.first_comment_input.toPlainText().strip() or None
         scheduled_at = self.scheduled_at_input.text().strip()
-        media_path = self.media_path_input.text().strip() or None
+        media_paths = self.media_paths_from_input()
+        media_path = media_paths if len(media_paths) > 1 else (media_paths[0] if media_paths else None)
 
-        if not message and not media_path:
+        if not message and not media_paths:
             QMessageBox.warning(self, "Missing content", "Add a message or choose media.")
             return
 
         media_type = self.media_type_input.currentText().strip().lower()
-        if media_type == "auto" or not media_path:
+        if media_type == "auto" or not media_paths:
             media_type = None
 
         try:
@@ -350,7 +368,7 @@ class SchedulerDesktopApp(QMainWindow):
                 row["scheduled_at"] or "",
                 row["message"] or "",
                 row["first_comment"] or "",
-                self.compact_path(media_path),
+                self.compact_media_path(media_path),
                 row["published_at"] or "",
                 row["facebook_post_id"] or "",
                 row["facebook_comment_id"] or "",
@@ -461,6 +479,17 @@ class SchedulerDesktopApp(QMainWindow):
             return os.path.relpath(path, scheduler.BASE_DIR)
         except ValueError:
             return path
+
+    def compact_media_path(self, media_path: str) -> str:
+        media_paths = scheduler.parse_media_paths(media_path)
+        if not media_paths:
+            return ""
+
+        compacted_paths = [self.compact_path(path) for path in media_paths]
+        if len(compacted_paths) == 1:
+            return compacted_paths[0]
+
+        return f"{len(compacted_paths)} images: " + ", ".join(compacted_paths)
 
     def closeEvent(self, event) -> None:
         self.stop_scheduler_event.set()

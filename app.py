@@ -5,7 +5,7 @@ import time
 import sqlite3
 import warnings
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 from urllib.parse import urlparse
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
@@ -19,6 +19,7 @@ DB_PATH = os.path.join(DB_DIR, "scheduler.db")
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
 VIDEO_EXTENSIONS = {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv"}
 MEDIA_TYPES = {"image", "video"}
+MediaPathInput = Optional[Union[str, list[str], tuple[str, ...]]]
 
 
 def is_placeholder_value(value: str) -> bool:
@@ -116,14 +117,66 @@ def normalize_media_path(media_path: str) -> str:
     return normalized_path
 
 
-def validate_media(media_path: Optional[str], media_type: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+def parse_media_paths(media_path: MediaPathInput) -> list[str]:
     if media_path is None:
+        return []
+
+    if isinstance(media_path, (list, tuple)):
+        return [path.strip() for path in media_path if path and path.strip()]
+
+    media_path = media_path.strip()
+    if not media_path:
+        return []
+
+    if media_path.startswith("["):
+        try:
+            values = json.loads(media_path)
+        except json.JSONDecodeError:
+            values = None
+
+        if isinstance(values, list) and all(isinstance(value, str) for value in values):
+            return [value.strip() for value in values if value.strip()]
+
+    if "\n" in media_path:
+        return [path.strip() for path in media_path.splitlines() if path.strip()]
+
+    return [media_path]
+
+
+def serialize_media_paths(media_paths: list[str]) -> Optional[str]:
+    if not media_paths:
+        return None
+
+    if len(media_paths) == 1:
+        return media_paths[0]
+
+    return json.dumps(media_paths)
+
+
+def validate_media(media_path: MediaPathInput, media_type: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    media_paths = parse_media_paths(media_path)
+    if not media_paths:
         if media_type:
             raise ValueError("Media type was provided without a media path")
         return None, None
 
-    media_path = media_path.strip()
-    normalized_media_type = media_type.strip().lower() if media_type else detect_media_type(media_path)
+    explicit_media_type = media_type.strip().lower() if media_type else None
+    detected_media_types = [detect_media_type(path) for path in media_paths]
+
+    if len(media_paths) > 1:
+        if explicit_media_type and explicit_media_type != "image":
+            raise ValueError("Multiple media files are only supported for image posts")
+
+        if any(detected_media_type != "image" for detected_media_type in detected_media_types):
+            raise ValueError("Multiple media files are only supported for images")
+
+        for path in media_paths:
+            normalize_media_path(path)
+
+        return serialize_media_paths(media_paths), "image"
+
+    media_path = media_paths[0]
+    normalized_media_type = explicit_media_type or detected_media_types[0]
 
     if normalized_media_type not in MEDIA_TYPES:
         raise ValueError("Media type must be image or video")
@@ -190,7 +243,7 @@ def validate_datetime(value: str) -> bool:
 def add_post(
     message: str,
     scheduled_at: str,
-    media_path: Optional[str] = None,
+    media_path: MediaPathInput = None,
     media_type: Optional[str] = None,
     first_comment: Optional[str] = None,
 ) -> None:
@@ -198,7 +251,7 @@ def add_post(
         raise ValueError("Date must be in format: YYYY-MM-DD HH:MM:SS")
 
     message = message.strip()
-    if not message and not media_path:
+    if not message and not parse_media_paths(media_path):
         raise ValueError("Add a message or media file for the post")
 
     media_path, media_type = validate_media(media_path, media_type)
@@ -251,7 +304,13 @@ def list_posts() -> None:
         print(f"ID: {row['id']}")
         print(f"Message: {row['message']}")
         if row["media_path"]:
-            print(f"Media: {row['media_type']} - {row['media_path']}")
+            media_paths = parse_media_paths(row["media_path"])
+            if len(media_paths) == 1:
+                print(f"Media: {row['media_type']} - {media_paths[0]}")
+            else:
+                print(f"Media: {row['media_type']} - {len(media_paths)} images")
+                for media_index, path in enumerate(media_paths, start=1):
+                    print(f"  {media_index}. {path}")
         if row["first_comment"]:
             print(f"First Comment: {row['first_comment']}")
         print(f"Scheduled At: {row['scheduled_at']}")
@@ -439,6 +498,57 @@ def publish_image_to_facebook(message: str, media_path: str) -> tuple[bool, str]
         return False, f"Request failed: {str(e)}"
 
 
+def upload_unpublished_image_to_facebook(media_path: str) -> tuple[bool, str]:
+    page_id, page_access_token, graph_api_version = get_facebook_config()
+    url = f"https://graph.facebook.com/{graph_api_version}/{page_id}/photos"
+    normalized_media_path = normalize_media_path(media_path)
+    payload = {
+        "published": "false",
+        "access_token": page_access_token,
+    }
+
+    try:
+        if is_remote_url(normalized_media_path):
+            response = requests.post(url, data={**payload, "url": normalized_media_path}, timeout=60)
+            return parse_facebook_response(response)
+
+        with open(normalized_media_path, "rb") as media_file:
+            response = requests.post(url, data=payload, files={"source": media_file}, timeout=120)
+            return parse_facebook_response(response)
+
+    except requests.RequestException as e:
+        return False, f"Request failed: {str(e)}"
+
+
+def publish_images_to_facebook(message: str, media_paths: list[str]) -> tuple[bool, str]:
+    if len(media_paths) == 1:
+        return publish_image_to_facebook(message, media_paths[0])
+
+    page_id, page_access_token, graph_api_version = get_facebook_config()
+    url = f"https://graph.facebook.com/{graph_api_version}/{page_id}/feed"
+    uploaded_photo_ids = []
+
+    for index, media_path in enumerate(media_paths, start=1):
+        success, result = upload_unpublished_image_to_facebook(media_path)
+        if not success:
+            return False, f"Image {index} upload failed: {result}"
+        uploaded_photo_ids.append(result)
+
+    payload = {
+        "message": message,
+        "access_token": page_access_token,
+    }
+    for index, photo_id in enumerate(uploaded_photo_ids):
+        payload[f"attached_media[{index}]"] = json.dumps({"media_fbid": photo_id})
+
+    try:
+        response = requests.post(url, data=payload, timeout=60)
+        return parse_facebook_response(response)
+
+    except requests.RequestException as e:
+        return False, f"Request failed: {str(e)}"
+
+
 def publish_video_to_facebook(message: str, media_path: str) -> tuple[bool, str]:
     page_id, page_access_token, graph_api_version = get_facebook_config()
     url = f"https://graph-video.facebook.com/{graph_api_version}/{page_id}/videos"
@@ -479,18 +589,20 @@ def publish_first_comment_to_facebook(facebook_post_id: str, first_comment: str)
 
 def publish_to_facebook(
     message: str,
-    media_path: Optional[str] = None,
+    media_path: MediaPathInput = None,
     media_type: Optional[str] = None,
 ) -> tuple[bool, str]:
-    if not media_path:
+    if not parse_media_paths(media_path):
         return publish_text_to_facebook(message)
 
     media_path, media_type = validate_media(media_path, media_type)
+    media_paths = parse_media_paths(media_path)
+
     if media_type == "image":
-        return publish_image_to_facebook(message, media_path)
+        return publish_images_to_facebook(message, media_paths)
 
     if media_type == "video":
-        return publish_video_to_facebook(message, media_path)
+        return publish_video_to_facebook(message, media_paths[0])
 
     return False, f"Unsupported media type: {media_type}"
 
@@ -569,6 +681,7 @@ Commands:
   python app.py add "Your message here" "2026-04-14 18:30:00" --comment "First comment here"
   python app.py add "Caption here" "2026-04-14 18:30:00" media/photo.jpg
   python app.py add-image "Caption here" "2026-04-14 18:30:00" media/photo.jpg
+  python app.py add-image "Caption here" "2026-04-14 18:30:00" media/photo-1.jpg media/photo-2.jpg
   python app.py add-video "Caption here" "2026-04-14 18:30:00" media/video.mp4
   python app.py list
   python app.py delete 1
@@ -595,6 +708,7 @@ def main() -> None:
             if len(sys.argv) < 4:
                 print('Example: python app.py add "My post text" "2026-04-14 18:30:00"')
                 print('Example with media: python app.py add "My caption" "2026-04-14 18:30:00" media/photo.jpg')
+                print('Example with multiple images: python app.py add "My caption" "2026-04-14 18:30:00" media/photo-1.jpg media/photo-2.jpg')
                 print('Example with first comment: python app.py add "My post text" "2026-04-14 18:30:00" --comment "First comment"')
                 sys.exit(1)
 
@@ -608,16 +722,18 @@ def main() -> None:
                     raise ValueError("--comment must be followed by comment text")
                 first_comment = args[comment_index + 1]
                 del args[comment_index:comment_index + 2]
-            media_path = args[0] if args else None
+            media_path = args if len(args) > 1 else (args[0] if args else None)
             add_post(message, scheduled_at, media_path, first_comment=first_comment)
             print("Post added.")
 
         elif command == "add-image":
             if len(sys.argv) < 5:
                 print('Example: python app.py add-image "My caption" "2026-04-14 18:30:00" media/photo.jpg')
+                print('Example with multiple images: python app.py add-image "My caption" "2026-04-14 18:30:00" media/photo-1.jpg media/photo-2.jpg')
                 sys.exit(1)
 
-            add_post(sys.argv[2], sys.argv[3], sys.argv[4], "image")
+            media_path = sys.argv[4:] if len(sys.argv) > 5 else sys.argv[4]
+            add_post(sys.argv[2], sys.argv[3], media_path, "image")
             print("Image post added.")
 
         elif command == "add-video":
