@@ -252,10 +252,15 @@ class SchedulerDesktopApp(QMainWindow):
         if not paths:
             return
 
-        self.media_path_input.setPlainText("\n".join(paths))
+        media_paths = self.media_paths_from_input()
+        for path in paths:
+            if path not in media_paths:
+                media_paths.append(path)
+
+        self.media_path_input.setPlainText("\n".join(media_paths))
         try:
-            detected_types = {scheduler.detect_media_type(path) for path in paths}
-            if len(paths) > 1:
+            detected_types = {scheduler.detect_media_type(path) for path in media_paths}
+            if len(media_paths) > 1:
                 self.media_type_input.setCurrentText("Image" if detected_types == {"image"} else "Auto")
             else:
                 self.media_type_input.setCurrentText(next(iter(detected_types)).capitalize())
