@@ -41,6 +41,7 @@ class SchedulerDesktopApp(QMainWindow):
         self.stop_scheduler_event = threading.Event()
         self.scheduler_thread: threading.Thread | None = None
         self.worker_running = False
+        self.page_configs: list[scheduler.FacebookPageConfig] = []
 
         self.setWindowTitle("Facebook Page Scheduler")
         self.resize(1180, 760)
@@ -48,6 +49,7 @@ class SchedulerDesktopApp(QMainWindow):
 
         self.build_layout()
         self.refresh_posts()
+        self.load_page_options()
 
         self.event_timer = QTimer(self)
         self.event_timer.timeout.connect(self.drain_events)
@@ -80,6 +82,10 @@ class SchedulerDesktopApp(QMainWindow):
         form_layout = QVBoxLayout(form_box)
         form_layout.setContentsMargins(14, 18, 14, 14)
         form_layout.setSpacing(8)
+
+        form_layout.addWidget(QLabel("Facebook Page"))
+        self.page_input = QComboBox()
+        form_layout.addWidget(self.page_input)
 
         form_layout.addWidget(QLabel("Message"))
         self.message_input = QPlainTextEdit()
@@ -129,10 +135,10 @@ class SchedulerDesktopApp(QMainWindow):
 
         actions_row = QHBoxLayout()
         actions_row.setSpacing(8)
-        schedule_button = QPushButton("Schedule")
-        schedule_button.clicked.connect(self.schedule_post)
-        schedule_button.setMinimumHeight(36)
-        actions_row.addWidget(schedule_button, 1)
+        self.schedule_button = QPushButton("Schedule")
+        self.schedule_button.clicked.connect(self.schedule_post)
+        self.schedule_button.setMinimumHeight(36)
+        actions_row.addWidget(self.schedule_button, 1)
 
         clear_button = QPushButton("Clear")
         clear_button.clicked.connect(self.clear_form)
@@ -185,9 +191,10 @@ class SchedulerDesktopApp(QMainWindow):
         table_toolbar.addWidget(delete_button)
         right_layout.addLayout(table_toolbar)
 
-        self.table = QTableWidget(0, 10)
+        self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels([
             "Status",
+            "Page",
             "Type",
             "Scheduled",
             "Message",
@@ -206,9 +213,10 @@ class SchedulerDesktopApp(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
         right_layout.addWidget(self.table, 1)
 
         activity_label = QLabel("Activity")
@@ -241,6 +249,26 @@ class SchedulerDesktopApp(QMainWindow):
 
     def set_now(self) -> None:
         self.scheduled_at_input.setText(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    def load_page_options(self) -> None:
+        self.page_input.clear()
+
+        try:
+            self.page_configs = scheduler.get_facebook_pages()
+        except Exception as exc:
+            self.page_configs = []
+            self.page_input.addItem("No pages configured", "")
+            self.page_input.setEnabled(False)
+            self.schedule_button.setEnabled(False)
+            self.set_status(f"Could not load Facebook pages: {exc}", error=True)
+            return
+
+        for page in self.page_configs:
+            self.page_input.addItem(page.label, page.key)
+
+        self.page_input.setEnabled(True)
+        self.schedule_button.setEnabled(True)
+        self.set_status(f"Loaded {len(self.page_configs)} Facebook page(s).")
 
     def browse_media(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -278,8 +306,13 @@ class SchedulerDesktopApp(QMainWindow):
         message = self.message_input.toPlainText().strip()
         first_comment = self.first_comment_input.toPlainText().strip() or None
         scheduled_at = self.scheduled_at_input.text().strip()
+        page_key = self.page_input.currentData()
         media_paths = self.media_paths_from_input()
         media_path = media_paths if len(media_paths) > 1 else (media_paths[0] if media_paths else None)
+
+        if not page_key:
+            QMessageBox.warning(self, "Missing page", "Add a Facebook page in .env first.")
+            return
 
         if not message and not media_paths:
             QMessageBox.warning(self, "Missing content", "Add a message or choose media.")
@@ -290,13 +323,13 @@ class SchedulerDesktopApp(QMainWindow):
             media_type = None
 
         try:
-            scheduler.add_post(message, scheduled_at, media_path, media_type, first_comment)
+            scheduler.add_post(message, scheduled_at, media_path, media_type, first_comment, page_key)
         except Exception as exc:
             QMessageBox.critical(self, "Could not schedule post", str(exc))
             self.set_status(f"Could not schedule post: {exc}", error=True)
             return
 
-        self.log("Post scheduled.")
+        self.log(f"Post scheduled for {self.page_input.currentText()}.")
         self.clear_form(keep_time=False)
         self.refresh_posts()
 
@@ -365,10 +398,12 @@ class SchedulerDesktopApp(QMainWindow):
         self.table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             status = row["status"] or ""
+            page_name = row["page_name"] or row["page_key"] or "Default"
             media_type = row["media_type"] or "text"
             media_path = row["media_path"] or ""
             values = [
                 status,
+                page_name,
                 media_type,
                 row["scheduled_at"] or "",
                 row["message"] or "",

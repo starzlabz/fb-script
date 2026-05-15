@@ -36,6 +36,22 @@ CHECK_INTERVAL_SECONDS=30
 
 Use a Facebook Page access token only. Paste just the token value, without `Bearer`, quotes, spaces, or inline comments.
 
+For multiple pages, keep the single-page variables above for the default page or use numbered page entries:
+
+```env
+PAGE_1_KEY=main
+PAGE_1_NAME=Main Page
+PAGE_1_ID=123456789012345
+PAGE_1_ACCESS_TOKEN=EAAB...
+
+PAGE_2_KEY=shop
+PAGE_2_NAME=Shop Page
+PAGE_2_ID=987654321098765
+PAGE_2_ACCESS_TOKEN=EAAB...
+```
+
+The desktop app shows these pages in a page picker. In the CLI, pass `--page main`, `--page shop`, or another configured key/name/page ID.
+
 ## Initialize Database
 ```bash
 python app.py init
@@ -52,6 +68,12 @@ On Windows, you can double-click `run_desktop.bat`.
 ## Add A Post
 ```bash
 python app.py add "Hello Facebook" "2026-04-14 18:30:00"
+```
+
+To target a specific configured page:
+
+```bash
+python app.py add "Hello Facebook" "2026-04-14 18:30:00" --page shop
 ```
 
 To publish a first comment right after the post:
@@ -93,6 +115,11 @@ python app.py add-video "Video caption" "2026-04-14 18:30:00" media/video.mp4
 ## List Posts
 ```bash
 python app.py list
+```
+
+## List Facebook Pages
+```bash
+python app.py pages
 ```
 
 ## Delete A Post

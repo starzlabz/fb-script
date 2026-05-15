@@ -4,6 +4,7 @@ import json
 import time
 import sqlite3
 import warnings
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Union
 from urllib.parse import urlparse
@@ -20,6 +21,19 @@ IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
 VIDEO_EXTENSIONS = {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv"}
 MEDIA_TYPES = {"image", "video"}
 MediaPathInput = Optional[Union[str, list[str], tuple[str, ...]]]
+
+
+@dataclass(frozen=True)
+class FacebookPageConfig:
+    key: str
+    name: str
+    page_id: str
+    page_access_token: str
+    graph_api_version: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} ({self.page_id})"
 
 
 def is_placeholder_value(value: str) -> bool:
@@ -41,6 +55,18 @@ def get_env(name: str, default: Optional[str] = None) -> str:
     value = value.strip()
     if is_placeholder_value(value):
         raise ValueError(f"{name} is still set to a placeholder value in .env")
+    return value
+
+
+def get_optional_env(name: str) -> Optional[str]:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+
+    value = value.strip()
+    if is_placeholder_value(value):
+        raise ValueError(f"{name} is still set to a placeholder value in .env")
+
     return value
 
 
@@ -66,12 +92,116 @@ def load_env_file(env_path: str = ".env") -> None:
                 os.environ[key] = value
 
 
-def validate_facebook_config(page_access_token: str) -> None:
+def validate_facebook_config(page_access_token: str, token_name: str = "PAGE_ACCESS_TOKEN") -> None:
     if page_access_token.lower().startswith("bearer "):
-        raise ValueError("PAGE_ACCESS_TOKEN should contain only the token, without 'Bearer '")
+        raise ValueError(f"{token_name} should contain only the token, without 'Bearer '")
 
     if any(ch.isspace() for ch in page_access_token):
-        raise ValueError("PAGE_ACCESS_TOKEN contains whitespace; keep the token on one line in .env")
+        raise ValueError(f"{token_name} contains whitespace; keep the token on one line in .env")
+
+
+def build_page_config(
+    key: str,
+    name: str,
+    page_id: str,
+    page_access_token: str,
+    graph_api_version: str,
+    token_name: str,
+) -> FacebookPageConfig:
+    page_id = page_id.strip()
+    if any(ch.isspace() for ch in page_id):
+        raise ValueError(f"{key} page ID contains whitespace; keep it on one line in .env")
+
+    validate_facebook_config(page_access_token, token_name)
+    return FacebookPageConfig(
+        key=key.strip(),
+        name=name.strip(),
+        page_id=page_id,
+        page_access_token=page_access_token.strip(),
+        graph_api_version=graph_api_version.strip(),
+    )
+
+
+def get_indexed_page_numbers() -> list[int]:
+    page_numbers = []
+    for key in os.environ:
+        if not key.startswith("PAGE_") or not key.endswith("_ID"):
+            continue
+
+        number = key[len("PAGE_"):-len("_ID")]
+        if number.isdigit():
+            page_numbers.append(int(number))
+
+    return sorted(set(page_numbers))
+
+
+def get_facebook_pages() -> list[FacebookPageConfig]:
+    graph_api_version = get_env("GRAPH_API_VERSION", "v25.0")
+    pages = []
+
+    legacy_page_id = get_optional_env("PAGE_ID")
+    legacy_page_access_token = get_optional_env("PAGE_ACCESS_TOKEN")
+    if legacy_page_id or legacy_page_access_token:
+        if not legacy_page_id or not legacy_page_access_token:
+            raise ValueError("Set both PAGE_ID and PAGE_ACCESS_TOKEN, or remove both.")
+
+        pages.append(build_page_config(
+            "default",
+            get_optional_env("PAGE_NAME") or "Default Page",
+            legacy_page_id,
+            legacy_page_access_token,
+            graph_api_version,
+            "PAGE_ACCESS_TOKEN",
+        ))
+
+    for number in get_indexed_page_numbers():
+        prefix = f"PAGE_{number}"
+        page_key = get_optional_env(f"{prefix}_KEY") or f"page_{number}"
+        page_name = get_optional_env(f"{prefix}_NAME") or f"Page {number}"
+        page_id = get_env(f"{prefix}_ID")
+        page_access_token = get_env(f"{prefix}_ACCESS_TOKEN")
+        page_graph_api_version = get_optional_env(f"{prefix}_GRAPH_API_VERSION") or graph_api_version
+
+        pages.append(build_page_config(
+            page_key,
+            page_name,
+            page_id,
+            page_access_token,
+            page_graph_api_version,
+            f"{prefix}_ACCESS_TOKEN",
+        ))
+
+    if not pages:
+        raise ValueError(
+            "No Facebook pages configured. Set PAGE_ID/PAGE_ACCESS_TOKEN "
+            "or PAGE_1_ID/PAGE_1_ACCESS_TOKEN in .env."
+        )
+
+    seen_keys = set()
+    for page in pages:
+        normalized_key = page.key.casefold()
+        if normalized_key in seen_keys:
+            raise ValueError(f"Duplicate Facebook page key in .env: {page.key}")
+        seen_keys.add(normalized_key)
+
+    return pages
+
+
+def get_facebook_config(page_key: Optional[str] = None) -> FacebookPageConfig:
+    pages = get_facebook_pages()
+    if not page_key or not page_key.strip():
+        return pages[0]
+
+    requested = page_key.strip()
+    requested_casefold = requested.casefold()
+    for page in pages:
+        if requested == page.page_id:
+            return page
+        if requested_casefold in {page.key.casefold(), page.name.casefold()}:
+            return page
+
+    available_pages = ", ".join(f"{page.key} ({page.name})" for page in pages)
+    raise ValueError(f"Unknown Facebook page '{requested}'. Available pages: {available_pages}")
 
 
 def is_remote_url(value: str) -> bool:
@@ -203,6 +333,8 @@ def init_db() -> None:
     cur.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            page_key TEXT,
+            page_name TEXT,
             message TEXT NOT NULL,
             scheduled_at TEXT NOT NULL,
             media_path TEXT,
@@ -219,6 +351,10 @@ def init_db() -> None:
 
     cur.execute("PRAGMA table_info(scheduled_posts)")
     columns = {row["name"] for row in cur.fetchall()}
+    if "page_key" not in columns:
+        cur.execute("ALTER TABLE scheduled_posts ADD COLUMN page_key TEXT")
+    if "page_name" not in columns:
+        cur.execute("ALTER TABLE scheduled_posts ADD COLUMN page_name TEXT")
     if "media_path" not in columns:
         cur.execute("ALTER TABLE scheduled_posts ADD COLUMN media_path TEXT")
     if "media_type" not in columns:
@@ -246,6 +382,7 @@ def add_post(
     media_path: MediaPathInput = None,
     media_type: Optional[str] = None,
     first_comment: Optional[str] = None,
+    page_key: Optional[str] = None,
 ) -> None:
     if not validate_datetime(scheduled_at):
         raise ValueError("Date must be in format: YYYY-MM-DD HH:MM:SS")
@@ -256,14 +393,25 @@ def add_post(
 
     media_path, media_type = validate_media(media_path, media_type)
     first_comment = first_comment.strip() if first_comment and first_comment.strip() else None
+    page_name = None
+    if page_key and page_key.strip():
+        page_config = get_facebook_config(page_key)
+        page_key = page_config.key
+        page_name = page_config.name
+    else:
+        page_key = None
 
     conn = get_db_connection()
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT INTO scheduled_posts (message, scheduled_at, media_path, media_type, first_comment, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO scheduled_posts (
+            page_key, page_name, message, scheduled_at, media_path, media_type, first_comment, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
+        page_key,
+        page_name,
         message,
         scheduled_at,
         media_path,
@@ -281,7 +429,7 @@ def get_posts() -> list[sqlite3.Row]:
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT id, message, scheduled_at, media_path, media_type, first_comment, status,
+        SELECT id, page_key, page_name, message, scheduled_at, media_path, media_type, first_comment, status,
                published_at, facebook_post_id, facebook_comment_id, error_message
         FROM scheduled_posts
         ORDER BY scheduled_at ASC
@@ -302,6 +450,7 @@ def list_posts() -> None:
     for row in rows:
         print("-" * 80)
         print(f"ID: {row['id']}")
+        print(f"Page: {row['page_name'] or row['page_key'] or 'default from .env'}")
         print(f"Message: {row['message']}")
         if row["media_path"]:
             media_paths = parse_media_paths(row["media_path"])
@@ -428,14 +577,6 @@ def mark_first_comment_failed(post_id: int, facebook_post_id: str, error_message
     conn.close()
 
 
-def get_facebook_config() -> tuple[str, str, str]:
-    page_id = get_env("PAGE_ID")
-    page_access_token = get_env("PAGE_ACCESS_TOKEN")
-    graph_api_version = get_env("GRAPH_API_VERSION", "v25.0")
-    validate_facebook_config(page_access_token)
-    return page_id, page_access_token, graph_api_version
-
-
 def parse_facebook_response(response: requests.Response) -> tuple[bool, str]:
     try:
         response.raise_for_status()
@@ -458,14 +599,17 @@ def parse_facebook_response(response: requests.Response) -> tuple[bool, str]:
             return False, f"HTTP error: {response.text}"
 
 
-def publish_text_to_facebook(message: str) -> tuple[bool, str]:
-    page_id, page_access_token, graph_api_version = get_facebook_config()
+def publish_text_to_facebook(
+    message: str,
+    page_config: Optional[FacebookPageConfig] = None,
+) -> tuple[bool, str]:
+    page_config = page_config or get_facebook_config()
 
-    url = f"https://graph.facebook.com/{graph_api_version}/{page_id}/feed"
+    url = f"https://graph.facebook.com/{page_config.graph_api_version}/{page_config.page_id}/feed"
 
     payload = {
         "message": message,
-        "access_token": page_access_token,
+        "access_token": page_config.page_access_token,
     }
 
     try:
@@ -476,13 +620,17 @@ def publish_text_to_facebook(message: str) -> tuple[bool, str]:
         return False, f"Request failed: {str(e)}"
 
 
-def publish_image_to_facebook(message: str, media_path: str) -> tuple[bool, str]:
-    page_id, page_access_token, graph_api_version = get_facebook_config()
-    url = f"https://graph.facebook.com/{graph_api_version}/{page_id}/photos"
+def publish_image_to_facebook(
+    message: str,
+    media_path: str,
+    page_config: Optional[FacebookPageConfig] = None,
+) -> tuple[bool, str]:
+    page_config = page_config or get_facebook_config()
+    url = f"https://graph.facebook.com/{page_config.graph_api_version}/{page_config.page_id}/photos"
     normalized_media_path = normalize_media_path(media_path)
     payload = {
         "caption": message,
-        "access_token": page_access_token,
+        "access_token": page_config.page_access_token,
     }
 
     try:
@@ -498,13 +646,16 @@ def publish_image_to_facebook(message: str, media_path: str) -> tuple[bool, str]
         return False, f"Request failed: {str(e)}"
 
 
-def upload_unpublished_image_to_facebook(media_path: str) -> tuple[bool, str]:
-    page_id, page_access_token, graph_api_version = get_facebook_config()
-    url = f"https://graph.facebook.com/{graph_api_version}/{page_id}/photos"
+def upload_unpublished_image_to_facebook(
+    media_path: str,
+    page_config: Optional[FacebookPageConfig] = None,
+) -> tuple[bool, str]:
+    page_config = page_config or get_facebook_config()
+    url = f"https://graph.facebook.com/{page_config.graph_api_version}/{page_config.page_id}/photos"
     normalized_media_path = normalize_media_path(media_path)
     payload = {
         "published": "false",
-        "access_token": page_access_token,
+        "access_token": page_config.page_access_token,
     }
 
     try:
@@ -520,23 +671,28 @@ def upload_unpublished_image_to_facebook(media_path: str) -> tuple[bool, str]:
         return False, f"Request failed: {str(e)}"
 
 
-def publish_images_to_facebook(message: str, media_paths: list[str]) -> tuple[bool, str]:
-    if len(media_paths) == 1:
-        return publish_image_to_facebook(message, media_paths[0])
+def publish_images_to_facebook(
+    message: str,
+    media_paths: list[str],
+    page_config: Optional[FacebookPageConfig] = None,
+) -> tuple[bool, str]:
+    page_config = page_config or get_facebook_config()
 
-    page_id, page_access_token, graph_api_version = get_facebook_config()
-    url = f"https://graph.facebook.com/{graph_api_version}/{page_id}/feed"
+    if len(media_paths) == 1:
+        return publish_image_to_facebook(message, media_paths[0], page_config)
+
+    url = f"https://graph.facebook.com/{page_config.graph_api_version}/{page_config.page_id}/feed"
     uploaded_photo_ids = []
 
     for index, media_path in enumerate(media_paths, start=1):
-        success, result = upload_unpublished_image_to_facebook(media_path)
+        success, result = upload_unpublished_image_to_facebook(media_path, page_config)
         if not success:
             return False, f"Image {index} upload failed: {result}"
         uploaded_photo_ids.append(result)
 
     payload = {
         "message": message,
-        "access_token": page_access_token,
+        "access_token": page_config.page_access_token,
     }
     for index, photo_id in enumerate(uploaded_photo_ids):
         payload[f"attached_media[{index}]"] = json.dumps({"media_fbid": photo_id})
@@ -549,13 +705,17 @@ def publish_images_to_facebook(message: str, media_paths: list[str]) -> tuple[bo
         return False, f"Request failed: {str(e)}"
 
 
-def publish_video_to_facebook(message: str, media_path: str) -> tuple[bool, str]:
-    page_id, page_access_token, graph_api_version = get_facebook_config()
-    url = f"https://graph-video.facebook.com/{graph_api_version}/{page_id}/videos"
+def publish_video_to_facebook(
+    message: str,
+    media_path: str,
+    page_config: Optional[FacebookPageConfig] = None,
+) -> tuple[bool, str]:
+    page_config = page_config or get_facebook_config()
+    url = f"https://graph-video.facebook.com/{page_config.graph_api_version}/{page_config.page_id}/videos"
     normalized_media_path = normalize_media_path(media_path)
     payload = {
         "description": message,
-        "access_token": page_access_token,
+        "access_token": page_config.page_access_token,
     }
 
     try:
@@ -571,12 +731,16 @@ def publish_video_to_facebook(message: str, media_path: str) -> tuple[bool, str]
         return False, f"Request failed: {str(e)}"
 
 
-def publish_first_comment_to_facebook(facebook_post_id: str, first_comment: str) -> tuple[bool, str]:
-    _, page_access_token, graph_api_version = get_facebook_config()
-    url = f"https://graph.facebook.com/{graph_api_version}/{facebook_post_id}/comments"
+def publish_first_comment_to_facebook(
+    facebook_post_id: str,
+    first_comment: str,
+    page_config: Optional[FacebookPageConfig] = None,
+) -> tuple[bool, str]:
+    page_config = page_config or get_facebook_config()
+    url = f"https://graph.facebook.com/{page_config.graph_api_version}/{facebook_post_id}/comments"
     payload = {
         "message": first_comment,
-        "access_token": page_access_token,
+        "access_token": page_config.page_access_token,
     }
 
     try:
@@ -591,18 +755,22 @@ def publish_to_facebook(
     message: str,
     media_path: MediaPathInput = None,
     media_type: Optional[str] = None,
+    page_key: Optional[str] = None,
+    page_config: Optional[FacebookPageConfig] = None,
 ) -> tuple[bool, str]:
+    page_config = page_config or get_facebook_config(page_key)
+
     if not parse_media_paths(media_path):
-        return publish_text_to_facebook(message)
+        return publish_text_to_facebook(message, page_config)
 
     media_path, media_type = validate_media(media_path, media_type)
     media_paths = parse_media_paths(media_path)
 
     if media_type == "image":
-        return publish_images_to_facebook(message, media_paths)
+        return publish_images_to_facebook(message, media_paths, page_config)
 
     if media_type == "video":
-        return publish_video_to_facebook(message, media_paths[0])
+        return publish_video_to_facebook(message, media_paths[0], page_config)
 
     return False, f"Unsupported media type: {media_type}"
 
@@ -610,6 +778,7 @@ def publish_to_facebook(
 def publish_post_with_first_comment(post: sqlite3.Row) -> tuple[bool, str, Optional[str], Optional[str]]:
     first_comment = post["first_comment"]
     facebook_post_id = post["facebook_post_id"]
+    page_config = get_facebook_config(post["page_key"])
 
     if facebook_post_id:
         post_success = True
@@ -619,6 +788,7 @@ def publish_post_with_first_comment(post: sqlite3.Row) -> tuple[bool, str, Optio
             post["message"],
             post["media_path"],
             post["media_type"],
+            page_config=page_config,
         )
 
     if not post_success:
@@ -628,7 +798,11 @@ def publish_post_with_first_comment(post: sqlite3.Row) -> tuple[bool, str, Optio
     if not first_comment or post["facebook_comment_id"]:
         return True, facebook_post_id, post["facebook_comment_id"], None
 
-    comment_success, comment_result = publish_first_comment_to_facebook(facebook_post_id, first_comment)
+    comment_success, comment_result = publish_first_comment_to_facebook(
+        facebook_post_id,
+        first_comment,
+        page_config,
+    )
     if not comment_success:
         return False, comment_result, facebook_post_id, None
 
@@ -654,9 +828,15 @@ def publish_due_posts_once(log=print) -> int:
         log(f"Found {len(due_posts)} due post(s)")
 
     for post in due_posts:
-        log(f"Publishing post ID {post['id']}...")
+        page_label = post["page_name"] or post["page_key"] or "default page"
+        log(f"Publishing post ID {post['id']} to {page_label}...")
 
-        success, result, facebook_post_id, facebook_comment_id = publish_post_with_first_comment(post)
+        try:
+            success, result, facebook_post_id, facebook_comment_id = publish_post_with_first_comment(post)
+        except Exception as e:
+            mark_post_failed(post["id"], str(e))
+            log(f"Failed: {e}")
+            continue
 
         if success:
             mark_post_success(post["id"], facebook_post_id, facebook_comment_id)
@@ -673,17 +853,37 @@ def publish_due_posts_once(log=print) -> int:
     return len(due_posts)
 
 
+def list_facebook_pages() -> None:
+    for page in get_facebook_pages():
+        print(f"{page.key}: {page.label}")
+
+
+def pop_cli_option(args: list[str], option: str) -> Optional[str]:
+    if option not in args:
+        return None
+
+    option_index = args.index(option)
+    if option_index == len(args) - 1:
+        raise ValueError(f"{option} must be followed by a value")
+
+    value = args[option_index + 1]
+    del args[option_index:option_index + 2]
+    return value
+
+
 def print_help() -> None:
     print("""
 Commands:
   python app.py init
   python app.py add "Your message here" "2026-04-14 18:30:00"
+  python app.py add "Your message here" "2026-04-14 18:30:00" --page page_2
   python app.py add "Your message here" "2026-04-14 18:30:00" --comment "First comment here"
   python app.py add "Caption here" "2026-04-14 18:30:00" media/photo.jpg
   python app.py add-image "Caption here" "2026-04-14 18:30:00" media/photo.jpg
   python app.py add-image "Caption here" "2026-04-14 18:30:00" media/photo-1.jpg media/photo-2.jpg
   python app.py add-video "Caption here" "2026-04-14 18:30:00" media/video.mp4
   python app.py list
+  python app.py pages
   python app.py delete 1
   python app.py retry 1
   python app.py run
@@ -715,15 +915,10 @@ def main() -> None:
             message = sys.argv[2]
             scheduled_at = sys.argv[3]
             args = sys.argv[4:]
-            first_comment = None
-            if "--comment" in args:
-                comment_index = args.index("--comment")
-                if comment_index == len(args) - 1:
-                    raise ValueError("--comment must be followed by comment text")
-                first_comment = args[comment_index + 1]
-                del args[comment_index:comment_index + 2]
+            page_key = pop_cli_option(args, "--page")
+            first_comment = pop_cli_option(args, "--comment")
             media_path = args if len(args) > 1 else (args[0] if args else None)
-            add_post(message, scheduled_at, media_path, first_comment=first_comment)
+            add_post(message, scheduled_at, media_path, first_comment=first_comment, page_key=page_key)
             print("Post added.")
 
         elif command == "add-image":
@@ -732,8 +927,12 @@ def main() -> None:
                 print('Example with multiple images: python app.py add-image "My caption" "2026-04-14 18:30:00" media/photo-1.jpg media/photo-2.jpg')
                 sys.exit(1)
 
-            media_path = sys.argv[4:] if len(sys.argv) > 5 else sys.argv[4]
-            add_post(sys.argv[2], sys.argv[3], media_path, "image")
+            args = sys.argv[4:]
+            page_key = pop_cli_option(args, "--page")
+            if not args:
+                raise ValueError("add-image requires at least one media path")
+            media_path = args if len(args) > 1 else args[0]
+            add_post(sys.argv[2], sys.argv[3], media_path, "image", page_key=page_key)
             print("Image post added.")
 
         elif command == "add-video":
@@ -741,11 +940,18 @@ def main() -> None:
                 print('Example: python app.py add-video "My caption" "2026-04-14 18:30:00" media/video.mp4')
                 sys.exit(1)
 
-            add_post(sys.argv[2], sys.argv[3], sys.argv[4], "video")
+            args = sys.argv[4:]
+            page_key = pop_cli_option(args, "--page")
+            if len(args) != 1:
+                raise ValueError("add-video requires one media path")
+            add_post(sys.argv[2], sys.argv[3], args[0], "video", page_key=page_key)
             print("Video post added.")
 
         elif command == "list":
             list_posts()
+
+        elif command == "pages":
+            list_facebook_pages()
 
         elif command == "delete":
             if len(sys.argv) < 3:
