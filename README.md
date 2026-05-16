@@ -36,6 +36,15 @@ CHECK_INTERVAL_SECONDS=30
 
 Use a Facebook Page access token only. Paste just the token value, without `Bearer`, quotes, spaces, or inline comments.
 
+To connect pages through Facebook Login from the desktop app, enable **Login from devices** in your Meta app and add your app credentials or enter them when the app asks:
+
+```env
+FACEBOOK_APP_ID=1234567890
+FACEBOOK_CLIENT_TOKEN=your_client_token
+```
+
+No localhost redirect URI is needed for the device-login flow. The default login scopes are `pages_show_list`, `pages_read_engagement`, and `pages_manage_posts`. If you need video publishing or comment management, set `FACEBOOK_LOGIN_SCOPES` with the additional approved permissions.
+
 For multiple pages, keep the single-page variables above for the default page or use numbered page entries:
 
 ```env
@@ -52,6 +61,8 @@ PAGE_2_ACCESS_TOKEN=EAAB...
 
 The desktop app shows these pages in a page picker. In the CLI, pass `--page main`, `--page shop`, or another configured key/name/page ID.
 
+If your first page still uses the original `PAGE_ID` and `PAGE_ACCESS_TOKEN` names, you can label it with `PAGE_1_KEY` and `PAGE_1_NAME`. Add additional pages with `PAGE_2_ID`, `PAGE_2_ACCESS_TOKEN`, and so on.
+
 ## Initialize Database
 ```bash
 python app.py init
@@ -64,6 +75,8 @@ python desktop.py
 
 On macOS, you can also double-click `run_desktop.command`.
 On Windows, you can double-click `run_desktop.bat`.
+
+Use **Connect Facebook** beside the Facebook Page picker to log in, select a Page, and save its Page access token automatically.
 
 ## Add A Post
 ```bash
