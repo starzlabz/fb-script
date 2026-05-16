@@ -3,13 +3,18 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
+import webbrowser
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -30,6 +35,71 @@ from PySide6.QtWidgets import (
 import app as scheduler
 
 
+class FacebookAppSettingsDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.setWindowTitle("Facebook App Settings")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+
+        self.app_id_input = QLineEdit(self.safe_env_value("FACEBOOK_APP_ID"))
+        self.app_id_input.setPlaceholderText("Meta app ID")
+        form_layout.addRow("App ID", self.app_id_input)
+
+        self.client_token_input = QLineEdit(self.safe_env_value("FACEBOOK_CLIENT_TOKEN"))
+        self.client_token_input.setPlaceholderText("Meta client token")
+        self.client_token_input.setEchoMode(QLineEdit.Password)
+        form_layout.addRow("Client Token", self.client_token_input)
+
+        layout.addLayout(form_layout)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Save")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def safe_env_value(self, name: str) -> str:
+        try:
+            return scheduler.get_optional_env(name) or ""
+        except Exception:
+            return ""
+
+    def values(self) -> tuple[str, str]:
+        return (
+            self.app_id_input.text().strip(),
+            self.client_token_input.text().strip(),
+        )
+
+
+class SelectFacebookPageDialog(QDialog):
+    def __init__(self, pages: list[scheduler.FacebookConnectedPage], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.pages = pages
+        self.setWindowTitle("Select Facebook Page")
+        self.setMinimumWidth(460)
+
+        layout = QVBoxLayout(self)
+
+        self.page_input = QComboBox()
+        for page in pages:
+            self.page_input.addItem(page.label)
+        layout.addWidget(self.page_input)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Connect Page")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def selected_page(self) -> scheduler.FacebookConnectedPage:
+        return self.pages[self.page_input.currentIndex()]
+
+
 class SchedulerDesktopApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -37,7 +107,7 @@ class SchedulerDesktopApp(QMainWindow):
         scheduler.load_env_file()
         scheduler.init_db()
 
-        self.events: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_scheduler_event = threading.Event()
         self.scheduler_thread: threading.Thread | None = None
         self.worker_running = False
@@ -84,8 +154,15 @@ class SchedulerDesktopApp(QMainWindow):
         form_layout.setSpacing(8)
 
         form_layout.addWidget(QLabel("Facebook Page"))
+        page_row = QHBoxLayout()
+        page_row.setSpacing(8)
         self.page_input = QComboBox()
-        form_layout.addWidget(self.page_input)
+        page_row.addWidget(self.page_input, 1)
+
+        self.connect_facebook_button = QPushButton("Connect Facebook")
+        self.connect_facebook_button.clicked.connect(self.connect_facebook)
+        page_row.addWidget(self.connect_facebook_button)
+        form_layout.addLayout(page_row)
 
         form_layout.addWidget(QLabel("Message"))
         self.message_input = QPlainTextEdit()
@@ -209,14 +286,8 @@ class SchedulerDesktopApp(QMainWindow):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        self.table.setWordWrap(False)
+        self.configure_posts_table_columns()
         right_layout.addWidget(self.table, 1)
 
         activity_label = QLabel("Activity")
@@ -250,7 +321,32 @@ class SchedulerDesktopApp(QMainWindow):
     def set_now(self) -> None:
         self.scheduled_at_input.setText(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-    def load_page_options(self) -> None:
+    def configure_posts_table_columns(self) -> None:
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(70)
+        header.setDefaultSectionSize(140)
+
+        column_widths = {
+            0: 92,
+            1: 130,
+            2: 82,
+            3: 180,
+            4: 260,
+            5: 180,
+            6: 220,
+            7: 180,
+            8: 190,
+            9: 170,
+            10: 280,
+        }
+
+        for column_index, width in column_widths.items():
+            header.setSectionResizeMode(column_index, QHeaderView.Interactive)
+            self.table.setColumnWidth(column_index, width)
+
+    def load_page_options(self, selected_page_key: str | None = None) -> None:
+        current_page_key = selected_page_key or self.page_input.currentData()
         self.page_input.clear()
 
         try:
@@ -266,9 +362,105 @@ class SchedulerDesktopApp(QMainWindow):
         for page in self.page_configs:
             self.page_input.addItem(page.label, page.key)
 
+        if current_page_key:
+            for index in range(self.page_input.count()):
+                if self.page_input.itemData(index) == current_page_key:
+                    self.page_input.setCurrentIndex(index)
+                    break
+
         self.page_input.setEnabled(True)
         self.schedule_button.setEnabled(True)
         self.set_status(f"Loaded {len(self.page_configs)} Facebook page(s).")
+
+    def ensure_facebook_app_config(self) -> scheduler.FacebookAppConfig | None:
+        try:
+            return scheduler.get_facebook_app_config()
+        except Exception:
+            pass
+
+        dialog = FacebookAppSettingsDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        app_id, client_token = dialog.values()
+        try:
+            return scheduler.save_facebook_app_config(app_id, client_token)
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not save Facebook app settings", str(exc))
+            self.set_status(f"Could not save Facebook app settings: {exc}", error=True)
+            return None
+
+    def connect_facebook(self) -> None:
+        app_config = self.ensure_facebook_app_config()
+        if app_config is None:
+            return
+
+        self.connect_facebook_button.setEnabled(False)
+        self.log("Opening Facebook connection in your browser.")
+        threading.Thread(
+            target=self.connect_facebook_worker,
+            args=(app_config,),
+            daemon=True,
+        ).start()
+
+    def connect_facebook_worker(self, app_config: scheduler.FacebookAppConfig) -> None:
+        try:
+            pages = self.fetch_connected_facebook_pages(app_config)
+            self.events.put(("facebook_pages", pages))
+        except Exception as exc:
+            self.events.put(("error", f"Facebook connection failed: {exc}"))
+        finally:
+            self.events.put(("connect_finished", None))
+
+    def fetch_connected_facebook_pages(
+        self,
+        app_config: scheduler.FacebookAppConfig,
+    ) -> list[scheduler.FacebookConnectedPage]:
+        device_login = scheduler.start_facebook_device_login(app_config)
+        user_code = str(device_login["user_code"])
+        verification_uri = str(device_login["verification_uri"])
+        device_code = str(device_login["code"])
+        expires_in = int(device_login["expires_in"])
+        interval = max(5, int(device_login["interval"]))
+
+        self.events.put(("device_code", {
+            "user_code": user_code,
+            "verification_uri": verification_uri,
+            "expires_in": expires_in,
+        }))
+
+        webbrowser.open(verification_uri)
+        deadline = time.monotonic() + expires_in
+        while time.monotonic() < deadline:
+            user_access_token = scheduler.poll_facebook_device_login(device_code, app_config)
+            if user_access_token:
+                return scheduler.get_connected_facebook_pages(user_access_token, app_config)
+
+            time.sleep(interval)
+
+        raise ValueError("Facebook device login timed out")
+
+    def save_connected_facebook_page(self, page: scheduler.FacebookConnectedPage) -> None:
+        try:
+            page_config = scheduler.save_connected_facebook_page_to_env(page)
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not save connected page", str(exc))
+            self.set_status(f"Could not save connected page: {exc}", error=True)
+            return
+
+        self.load_page_options(selected_page_key=page_config.key)
+        self.log(f"Connected Facebook page {page_config.name}.")
+
+    def choose_connected_facebook_page(self, pages: list[scheduler.FacebookConnectedPage]) -> None:
+        if len(pages) == 1:
+            self.save_connected_facebook_page(pages[0])
+            return
+
+        dialog = SelectFacebookPageDialog(pages, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.save_connected_facebook_page(dialog.selected_page())
 
     def browse_media(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -418,6 +610,7 @@ class SchedulerDesktopApp(QMainWindow):
             for column_index, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.UserRole, row["id"])
+                item.setToolTip(value)
                 if status == "published":
                     item.setForeground(Qt.darkGreen)
                 elif status in {"failed", "comment_failed"}:
@@ -491,14 +684,26 @@ class SchedulerDesktopApp(QMainWindow):
             except queue.Empty:
                 break
 
-            if event_type == "log" and payload is not None:
+            if event_type == "log" and isinstance(payload, str):
                 self.log(payload)
-            elif event_type == "error" and payload is not None:
+            elif event_type == "error" and isinstance(payload, str):
                 self.log(f"Error: {payload}")
                 self.set_status(payload, error=True)
                 self.refresh_posts()
             elif event_type == "refresh":
                 self.refresh_posts()
+            elif event_type == "facebook_pages" and isinstance(payload, list):
+                self.choose_connected_facebook_page(payload)
+            elif event_type == "connect_finished":
+                self.connect_facebook_button.setEnabled(True)
+            elif event_type == "device_code" and isinstance(payload, dict):
+                user_code = str(payload.get("user_code", ""))
+                verification_uri = str(payload.get("verification_uri", "https://www.facebook.com/device"))
+                QMessageBox.information(
+                    self,
+                    "Connect Facebook",
+                    f"Enter code {user_code} at {verification_uri}.",
+                )
 
     def log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")

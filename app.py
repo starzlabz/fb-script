@@ -7,7 +7,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Union
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
@@ -21,6 +21,12 @@ IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
 VIDEO_EXTENSIONS = {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv"}
 MEDIA_TYPES = {"image", "video"}
 MediaPathInput = Optional[Union[str, list[str], tuple[str, ...]]]
+DEFAULT_FACEBOOK_REDIRECT_URI = "http://localhost:8765/facebook/callback"
+DEFAULT_FACEBOOK_LOGIN_SCOPES = [
+    "pages_show_list",
+    "pages_read_engagement",
+    "pages_manage_posts",
+]
 
 
 @dataclass(frozen=True)
@@ -30,6 +36,27 @@ class FacebookPageConfig:
     page_id: str
     page_access_token: str
     graph_api_version: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} ({self.page_id})"
+
+
+@dataclass(frozen=True)
+class FacebookAppConfig:
+    app_id: str
+    app_secret: Optional[str]
+    client_token: str
+    redirect_uri: str
+    graph_api_version: str
+    scopes: list[str]
+
+
+@dataclass(frozen=True)
+class FacebookConnectedPage:
+    name: str
+    page_id: str
+    page_access_token: str
 
     @property
     def label(self) -> str:
@@ -122,17 +149,290 @@ def build_page_config(
     )
 
 
+def get_page_number_from_env_key(key: str) -> Optional[int]:
+    parts = key.split("_", 2)
+    if len(parts) < 3 or parts[0] != "PAGE" or not parts[1].isdigit():
+        return None
+
+    return int(parts[1])
+
+
 def get_indexed_page_numbers() -> list[int]:
     page_numbers = []
     for key in os.environ:
-        if not key.startswith("PAGE_") or not key.endswith("_ID"):
+        if not key.endswith("_ID"):
             continue
 
-        number = key[len("PAGE_"):-len("_ID")]
-        if number.isdigit():
-            page_numbers.append(int(number))
+        page_number = get_page_number_from_env_key(key)
+        if page_number is not None:
+            page_numbers.append(page_number)
 
     return sorted(set(page_numbers))
+
+
+def get_occupied_page_numbers() -> list[int]:
+    page_numbers = []
+    for key in os.environ:
+        page_number = get_page_number_from_env_key(key)
+        if page_number is not None:
+            page_numbers.append(page_number)
+
+    return sorted(set(page_numbers))
+
+
+def make_page_key(page_name: str) -> str:
+    key_chars = []
+    previous_was_separator = False
+
+    for char in page_name.strip().lower():
+        if char.isascii() and char.isalnum():
+            key_chars.append(char)
+            previous_was_separator = False
+        elif not previous_was_separator:
+            key_chars.append("_")
+            previous_was_separator = True
+
+    page_key = "".join(key_chars).strip("_")
+    return page_key or "page"
+
+
+def make_unique_page_key(page_key: str, existing_keys: set[str]) -> str:
+    candidate = page_key
+    suffix = 2
+
+    while candidate.casefold() in existing_keys:
+        candidate = f"{page_key}_{suffix}"
+        suffix += 1
+
+    return candidate
+
+
+def validate_env_line_value(name: str, value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError(f"{name} cannot be empty")
+
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"{name} cannot contain new lines")
+
+    return value
+
+
+def next_page_number_for_env() -> int:
+    page_numbers = set(get_occupied_page_numbers())
+
+    if get_optional_env("PAGE_ID") or get_optional_env("PAGE_ACCESS_TOKEN"):
+        page_numbers.add(1)
+
+    page_number = 1
+    while page_number in page_numbers:
+        page_number += 1
+
+    return page_number
+
+
+def append_env_lines(env_path: str, lines: list[str]) -> None:
+    existing_content = ""
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            existing_content = f.read()
+
+    with open(env_path, "a", encoding="utf-8") as f:
+        if existing_content and not existing_content.endswith("\n"):
+            f.write("\n")
+        if existing_content:
+            f.write("\n")
+        for line in lines:
+            f.write(f"{line}\n")
+
+
+def set_env_values(values: dict[str, str], env_path: str = ".env") -> None:
+    existing_lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            existing_lines = f.read().splitlines()
+
+    remaining_values = {
+        key: validate_env_line_value(key, value)
+        for key, value in values.items()
+    }
+    updated_lines = []
+
+    for line in existing_lines:
+        stripped_line = line.strip()
+        if not stripped_line or stripped_line.startswith("#") or "=" not in line:
+            updated_lines.append(line)
+            continue
+
+        key, _ = line.split("=", 1)
+        key = key.strip()
+        if key in remaining_values:
+            updated_lines.append(f"{key}={remaining_values.pop(key)}")
+        else:
+            updated_lines.append(line)
+
+    if remaining_values:
+        if updated_lines and updated_lines[-1].strip():
+            updated_lines.append("")
+        for key, value in remaining_values.items():
+            updated_lines.append(f"{key}={value}")
+
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(updated_lines))
+        f.write("\n")
+
+    for key, value in values.items():
+        os.environ[key] = value.strip()
+
+
+def save_facebook_app_config(
+    app_id: str,
+    client_token: str,
+    redirect_uri: Optional[str] = None,
+    env_path: str = ".env",
+) -> FacebookAppConfig:
+    app_id = validate_env_line_value("Facebook app ID", app_id)
+    client_token = validate_env_line_value("Facebook client token", client_token)
+
+    values = {
+        "FACEBOOK_APP_ID": app_id,
+        "FACEBOOK_CLIENT_TOKEN": client_token,
+    }
+    if redirect_uri and redirect_uri.strip():
+        values["FACEBOOK_REDIRECT_URI"] = validate_env_line_value("Facebook redirect URI", redirect_uri)
+
+    set_env_values(values, env_path)
+
+    return get_facebook_app_config()
+
+
+def get_facebook_login_scopes() -> list[str]:
+    scopes_value = get_optional_env("FACEBOOK_LOGIN_SCOPES")
+    if not scopes_value:
+        return DEFAULT_FACEBOOK_LOGIN_SCOPES
+
+    scopes = [
+        scope.strip()
+        for scope in scopes_value.replace(" ", ",").split(",")
+        if scope.strip()
+    ]
+    return scopes or DEFAULT_FACEBOOK_LOGIN_SCOPES
+
+
+def get_facebook_app_config() -> FacebookAppConfig:
+    return FacebookAppConfig(
+        app_id=get_env("FACEBOOK_APP_ID"),
+        app_secret=get_optional_env("FACEBOOK_APP_SECRET"),
+        client_token=get_env("FACEBOOK_CLIENT_TOKEN"),
+        redirect_uri=get_env("FACEBOOK_REDIRECT_URI", DEFAULT_FACEBOOK_REDIRECT_URI),
+        graph_api_version=get_env("GRAPH_API_VERSION", "v25.0"),
+        scopes=get_facebook_login_scopes(),
+    )
+
+
+def add_facebook_page_to_env(
+    page_name: str,
+    page_id: str,
+    page_access_token: str,
+    page_key: Optional[str] = None,
+    env_path: str = ".env",
+) -> FacebookPageConfig:
+    load_env_file(env_path)
+
+    page_name = validate_env_line_value("Page name", page_name)
+    page_id = validate_env_line_value("Page ID", page_id)
+    page_access_token = validate_env_line_value("Page access token", page_access_token)
+    if any(ch.isspace() for ch in page_id):
+        raise ValueError("Page ID cannot contain whitespace")
+
+    validate_facebook_config(page_access_token, "Page access token")
+
+    try:
+        existing_pages = get_facebook_pages()
+    except ValueError as e:
+        if "No Facebook pages configured" not in str(e):
+            raise
+        existing_pages = []
+
+    if any(page.page_id == page_id for page in existing_pages):
+        raise ValueError("This Facebook Page ID is already configured")
+
+    if any(page.name.casefold() == page_name.casefold() for page in existing_pages):
+        raise ValueError("A Facebook page with this name is already configured")
+
+    existing_keys = {page.key.casefold() for page in existing_pages}
+    if page_key and page_key.strip():
+        page_key = validate_env_line_value("Page key", page_key)
+        if any(ch.isspace() for ch in page_key):
+            raise ValueError("Page key cannot contain whitespace")
+        if page_key.casefold() in existing_keys:
+            raise ValueError("A Facebook page with this key is already configured")
+    else:
+        page_key = make_unique_page_key(make_page_key(page_name), existing_keys)
+
+    page_number = next_page_number_for_env()
+    prefix = f"PAGE_{page_number}"
+    graph_api_version = get_env("GRAPH_API_VERSION", "v25.0")
+    page_config = build_page_config(
+        page_key,
+        page_name,
+        page_id,
+        page_access_token,
+        graph_api_version,
+        f"{prefix}_ACCESS_TOKEN",
+    )
+
+    append_env_lines(env_path, [
+        f"{prefix}_KEY={page_config.key}",
+        f"{prefix}_NAME={page_config.name}",
+        f"{prefix}_ID={page_config.page_id}",
+        f"{prefix}_ACCESS_TOKEN={page_config.page_access_token}",
+    ])
+
+    os.environ[f"{prefix}_KEY"] = page_config.key
+    os.environ[f"{prefix}_NAME"] = page_config.name
+    os.environ[f"{prefix}_ID"] = page_config.page_id
+    os.environ[f"{prefix}_ACCESS_TOKEN"] = page_config.page_access_token
+
+    return page_config
+
+
+def save_connected_facebook_page_to_env(
+    connected_page: FacebookConnectedPage,
+    env_path: str = ".env",
+) -> FacebookPageConfig:
+    load_env_file(env_path)
+
+    page_name = validate_env_line_value("Page name", connected_page.name)
+    page_id = validate_env_line_value("Page ID", connected_page.page_id)
+    page_access_token = validate_env_line_value("Page access token", connected_page.page_access_token)
+
+    if get_optional_env("PAGE_ID") == page_id:
+        values = {"PAGE_ACCESS_TOKEN": page_access_token}
+        if get_optional_env("PAGE_1_NAME") and not get_optional_env("PAGE_1_ID"):
+            values["PAGE_1_NAME"] = page_name
+        else:
+            values["PAGE_NAME"] = page_name
+        set_env_values(values, env_path)
+        return get_facebook_config(page_id)
+
+    for number in get_indexed_page_numbers():
+        prefix = f"PAGE_{number}"
+        if get_optional_env(f"{prefix}_ID") != page_id:
+            continue
+
+        set_env_values({
+            f"{prefix}_NAME": page_name,
+            f"{prefix}_ACCESS_TOKEN": page_access_token,
+        }, env_path)
+        return get_facebook_config(page_id)
+
+    return add_facebook_page_to_env(
+        page_name,
+        page_id,
+        page_access_token,
+        env_path=env_path,
+    )
 
 
 def get_facebook_pages() -> list[FacebookPageConfig]:
@@ -145,9 +445,15 @@ def get_facebook_pages() -> list[FacebookPageConfig]:
         if not legacy_page_id or not legacy_page_access_token:
             raise ValueError("Set both PAGE_ID and PAGE_ACCESS_TOKEN, or remove both.")
 
+        legacy_page_key = get_optional_env("PAGE_KEY")
+        legacy_page_name = get_optional_env("PAGE_NAME")
+        if not get_optional_env("PAGE_1_ID"):
+            legacy_page_key = legacy_page_key or get_optional_env("PAGE_1_KEY")
+            legacy_page_name = legacy_page_name or get_optional_env("PAGE_1_NAME")
+
         pages.append(build_page_config(
-            "default",
-            get_optional_env("PAGE_NAME") or "Default Page",
+            legacy_page_key or "default",
+            legacy_page_name or "Default Page",
             legacy_page_id,
             legacy_page_access_token,
             graph_api_version,
@@ -202,6 +508,218 @@ def get_facebook_config(page_key: Optional[str] = None) -> FacebookPageConfig:
 
     available_pages = ", ".join(f"{page.key} ({page.name})" for page in pages)
     raise ValueError(f"Unknown Facebook page '{requested}'. Available pages: {available_pages}")
+
+
+def facebook_response_json(response: requests.Response) -> dict:
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    if response.status_code >= 400 or "error" in data:
+        if data:
+            raise ValueError(f"Facebook API error: {json.dumps(data, ensure_ascii=False)}")
+        raise ValueError(f"Facebook API error: HTTP {response.status_code}")
+
+    if not isinstance(data, dict):
+        raise ValueError("Facebook API returned an unexpected response")
+
+    return data
+
+
+def build_facebook_login_url(state: str, app_config: Optional[FacebookAppConfig] = None) -> str:
+    app_config = app_config or get_facebook_app_config()
+    query = urlencode({
+        "client_id": app_config.app_id,
+        "redirect_uri": app_config.redirect_uri,
+        "state": state,
+        "scope": ",".join(app_config.scopes),
+        "response_type": "code",
+    })
+    return f"https://www.facebook.com/{app_config.graph_api_version}/dialog/oauth?{query}"
+
+
+def exchange_facebook_code_for_user_token(
+    code: str,
+    app_config: Optional[FacebookAppConfig] = None,
+) -> str:
+    app_config = app_config or get_facebook_app_config()
+    if not app_config.app_secret:
+        raise ValueError("FACEBOOK_APP_SECRET is required for redirect-based Facebook Login")
+
+    response = requests.get(
+        f"https://graph.facebook.com/{app_config.graph_api_version}/oauth/access_token",
+        params={
+            "client_id": app_config.app_id,
+            "client_secret": app_config.app_secret,
+            "redirect_uri": app_config.redirect_uri,
+            "code": code,
+        },
+        timeout=30,
+    )
+    data = facebook_response_json(response)
+    user_access_token = data.get("access_token")
+    if not isinstance(user_access_token, str) or not user_access_token.strip():
+        raise ValueError("Facebook did not return a user access token")
+
+    return user_access_token
+
+
+def exchange_for_long_lived_user_token(
+    user_access_token: str,
+    app_config: Optional[FacebookAppConfig] = None,
+) -> str:
+    app_config = app_config or get_facebook_app_config()
+    if not app_config.app_secret:
+        raise ValueError("FACEBOOK_APP_SECRET is required to exchange a long-lived user token")
+
+    response = requests.get(
+        f"https://graph.facebook.com/{app_config.graph_api_version}/oauth/access_token",
+        params={
+            "grant_type": "fb_exchange_token",
+            "client_id": app_config.app_id,
+            "client_secret": app_config.app_secret,
+            "fb_exchange_token": user_access_token,
+        },
+        timeout=30,
+    )
+    data = facebook_response_json(response)
+    long_lived_token = data.get("access_token")
+    if not isinstance(long_lived_token, str) or not long_lived_token.strip():
+        raise ValueError("Facebook did not return a long-lived user access token")
+
+    return long_lived_token
+
+
+def get_facebook_device_app_token(app_config: Optional[FacebookAppConfig] = None) -> str:
+    app_config = app_config or get_facebook_app_config()
+    return f"{app_config.app_id}|{app_config.client_token}"
+
+
+def start_facebook_device_login(app_config: Optional[FacebookAppConfig] = None) -> dict:
+    app_config = app_config or get_facebook_app_config()
+    response = requests.post(
+        f"https://graph.facebook.com/{app_config.graph_api_version}/device/login",
+        data={
+            "access_token": get_facebook_device_app_token(app_config),
+            "scope": ",".join(app_config.scopes),
+        },
+        timeout=30,
+    )
+    data = facebook_response_json(response)
+    required_fields = {"code", "user_code", "verification_uri", "expires_in", "interval"}
+    if not required_fields.issubset(data):
+        raise ValueError(f"Unexpected Facebook device login response: {json.dumps(data, ensure_ascii=False)}")
+
+    return data
+
+
+def poll_facebook_device_login(
+    device_code: str,
+    app_config: Optional[FacebookAppConfig] = None,
+) -> Optional[str]:
+    app_config = app_config or get_facebook_app_config()
+    response = requests.post(
+        f"https://graph.facebook.com/{app_config.graph_api_version}/device/login_status",
+        data={
+            "access_token": get_facebook_device_app_token(app_config),
+            "code": device_code,
+        },
+        timeout=30,
+    )
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    access_token = data.get("access_token") if isinstance(data, dict) else None
+    if isinstance(access_token, str) and access_token.strip():
+        return access_token
+
+    error = data.get("error") if isinstance(data, dict) and isinstance(data.get("error"), dict) else {}
+    error_text = " ".join(
+        str(error.get(key, ""))
+        for key in ("message", "error_user_title", "error_user_msg")
+    ).lower()
+    try:
+        error_code = int(error.get("code"))
+    except (TypeError, ValueError):
+        error_code = None
+    try:
+        error_subcode = int(error.get("error_subcode"))
+    except (TypeError, ValueError):
+        error_subcode = None
+    pending_markers = {
+        "authorization_pending",
+        "authorization pending",
+        "code has not been authorized",
+        "continue polling",
+        "device login authorization pending",
+        "not yet authorized",
+        "pending action",
+        "slow_down",
+    }
+    pending_codes = {1349172, 1349174, 1349176}
+    if (
+        any(marker in error_text for marker in pending_markers)
+        or error_code in pending_codes
+        or error_subcode in pending_codes
+    ):
+        return None
+
+    facebook_response_json(response)
+    return None
+
+
+def get_connected_facebook_pages(
+    user_access_token: str,
+    app_config: Optional[FacebookAppConfig] = None,
+) -> list[FacebookConnectedPage]:
+    app_config = app_config or get_facebook_app_config()
+    pages = []
+    url = f"https://graph.facebook.com/{app_config.graph_api_version}/me/accounts"
+    params = {
+        "fields": "id,name,access_token",
+        "limit": "100",
+        "access_token": user_access_token,
+    }
+
+    while url:
+        response = requests.get(url, params=params, timeout=30)
+        data = facebook_response_json(response)
+        params = None
+
+        for item in data.get("data", []):
+            if not isinstance(item, dict):
+                continue
+
+            page_id = item.get("id")
+            page_name = item.get("name")
+            page_access_token = item.get("access_token")
+            if not all(isinstance(value, str) and value.strip() for value in (
+                page_id,
+                page_name,
+                page_access_token,
+            )):
+                continue
+
+            pages.append(FacebookConnectedPage(
+                name=page_name,
+                page_id=page_id,
+                page_access_token=page_access_token,
+            ))
+
+        paging = data.get("paging") if isinstance(data.get("paging"), dict) else {}
+        url = paging.get("next")
+
+    if not pages:
+        raise ValueError(
+            "No Facebook Pages were returned. Make sure your app has the Page permissions "
+            "and the logged-in Facebook account can manage at least one Page."
+        )
+
+    return pages
 
 
 def is_remote_url(value: str) -> bool:
