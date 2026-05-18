@@ -503,7 +503,7 @@ class SchedulerDesktopApp(QMainWindow):
         media_path = media_paths if len(media_paths) > 1 else (media_paths[0] if media_paths else None)
 
         if not page_key:
-            QMessageBox.warning(self, "Missing page", "Add a Facebook page in .env first.")
+            QMessageBox.warning(self, "Missing page", "Use Connect Facebook to add a page first.")
             return
 
         if not message and not media_paths:

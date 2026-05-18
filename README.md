@@ -25,7 +25,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in the project root:
+For source/development runs, the app creates a blank `.env` file in the project root if it is missing. You can also fill it manually:
 
 ```env
 PAGE_ID=123456789012345
@@ -35,6 +35,14 @@ CHECK_INTERVAL_SECONDS=30
 ```
 
 Use a Facebook Page access token only. Paste just the token value, without `Bearer`, quotes, spaces, or inline comments.
+
+Packaged desktop builds create and use a writable `.env` file outside the app bundle:
+
+- Windows: `%LOCALAPPDATA%\FacebookPageScheduler\.env`
+- macOS: `~/Library/Application Support/FacebookPageScheduler/.env`
+- Linux: `~/.local/share/FacebookPageScheduler/.env`
+
+The SQLite database is stored beside that config folder under `data/scheduler.db`. Do not ship your personal `.env` with real tokens; let the app create a blank one for each user.
 
 To connect pages through Facebook Login from the desktop app, enable **Login from devices** in your Meta app and add your app credentials or enter them when the app asks:
 
@@ -77,6 +85,16 @@ On macOS, you can also double-click `run_desktop.command`.
 On Windows, you can double-click `run_desktop.bat`.
 
 Use **Connect Facebook** beside the Facebook Page picker to log in, select a Page, and save its Page access token automatically.
+
+## Build Desktop App
+Build Windows packages on Windows and macOS packages on macOS:
+
+```bash
+python -m pip install -r requirements.txt pyinstaller
+python -m PyInstaller --noconfirm --clean --windowed --name FacebookPageScheduler desktop.py
+```
+
+Send the generated `dist/FacebookPageScheduler` folder on Windows or `dist/FacebookPageScheduler.app` on macOS. On first launch, the app creates a blank writable `.env` for that user and saves tokens there through the UI.
 
 ## Add A Post
 ```bash

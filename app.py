@@ -14,8 +14,33 @@ warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 import requests
 
 
+APP_NAME = "FacebookPageScheduler"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_DIR = os.path.join(BASE_DIR, "data")
+
+
+def is_packaged_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def get_user_data_dir() -> str:
+    if sys.platform == "win32":
+        root = (
+            os.getenv("LOCALAPPDATA")
+            or os.getenv("APPDATA")
+            or os.path.expanduser(r"~\AppData\Local")
+        )
+    elif sys.platform == "darwin":
+        root = os.path.expanduser("~/Library/Application Support")
+    else:
+        root = os.getenv("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+
+    return os.path.join(root, APP_NAME)
+
+
+APP_DATA_DIR = get_user_data_dir()
+RUNTIME_DIR = APP_DATA_DIR if is_packaged_app() else BASE_DIR
+ENV_PATH = os.path.join(RUNTIME_DIR, ".env")
+DB_DIR = os.path.join(RUNTIME_DIR, "data")
 DB_PATH = os.path.join(DB_DIR, "scheduler.db")
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
 VIDEO_EXTENSIONS = {".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm", ".wmv"}
@@ -27,6 +52,12 @@ DEFAULT_FACEBOOK_LOGIN_SCOPES = [
     "pages_read_engagement",
     "pages_manage_posts",
 ]
+DEFAULT_ENV_TEMPLATE = """# Facebook Page Scheduler local configuration
+# The desktop app writes Facebook settings and page tokens here.
+
+GRAPH_API_VERSION=v25.0
+CHECK_INTERVAL_SECONDS=30
+"""
 
 
 @dataclass(frozen=True)
@@ -75,6 +106,27 @@ def strip_env_quotes(value: str) -> str:
     return value
 
 
+def resolve_env_path(env_path: Optional[str] = None) -> str:
+    return env_path or ENV_PATH
+
+
+def ensure_parent_dir(path: str) -> None:
+    parent_dir = os.path.dirname(os.path.abspath(path))
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+
+def ensure_env_file(env_path: Optional[str] = None) -> str:
+    resolved_env_path = resolve_env_path(env_path)
+    ensure_parent_dir(resolved_env_path)
+
+    if not os.path.exists(resolved_env_path):
+        with open(resolved_env_path, "w", encoding="utf-8") as f:
+            f.write(DEFAULT_ENV_TEMPLATE)
+
+    return resolved_env_path
+
+
 def get_env(name: str, default: Optional[str] = None) -> str:
     value = os.getenv(name, default)
     if value is None or not value.strip():
@@ -97,9 +149,8 @@ def get_optional_env(name: str) -> Optional[str]:
     return value
 
 
-def load_env_file(env_path: str = ".env") -> None:
-    if not os.path.exists(env_path):
-        return
+def load_env_file(env_path: Optional[str] = None) -> None:
+    env_path = ensure_env_file(env_path)
 
     with open(env_path, "r", encoding="utf-8") as f:
         for raw_line in f:
@@ -231,7 +282,8 @@ def next_page_number_for_env() -> int:
     return page_number
 
 
-def append_env_lines(env_path: str, lines: list[str]) -> None:
+def append_env_lines(env_path: Optional[str], lines: list[str]) -> None:
+    env_path = ensure_env_file(env_path)
     existing_content = ""
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:
@@ -246,7 +298,8 @@ def append_env_lines(env_path: str, lines: list[str]) -> None:
             f.write(f"{line}\n")
 
 
-def set_env_values(values: dict[str, str], env_path: str = ".env") -> None:
+def set_env_values(values: dict[str, str], env_path: Optional[str] = None) -> None:
+    env_path = ensure_env_file(env_path)
     existing_lines = []
     if os.path.exists(env_path):
         with open(env_path, "r", encoding="utf-8") as f:
@@ -289,7 +342,7 @@ def save_facebook_app_config(
     app_id: str,
     client_token: str,
     redirect_uri: Optional[str] = None,
-    env_path: str = ".env",
+    env_path: Optional[str] = None,
 ) -> FacebookAppConfig:
     app_id = validate_env_line_value("Facebook app ID", app_id)
     client_token = validate_env_line_value("Facebook client token", client_token)
@@ -335,7 +388,7 @@ def add_facebook_page_to_env(
     page_id: str,
     page_access_token: str,
     page_key: Optional[str] = None,
-    env_path: str = ".env",
+    env_path: Optional[str] = None,
 ) -> FacebookPageConfig:
     load_env_file(env_path)
 
@@ -399,7 +452,7 @@ def add_facebook_page_to_env(
 
 def save_connected_facebook_page_to_env(
     connected_page: FacebookConnectedPage,
-    env_path: str = ".env",
+    env_path: Optional[str] = None,
 ) -> FacebookPageConfig:
     load_env_file(env_path)
 
