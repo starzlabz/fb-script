@@ -981,8 +981,11 @@ class SchedulerDesktopApp(QMainWindow):
 def main() -> None:
     app = QApplication([])
     try:
-        licensing.get_saved_license_info()
+        license_info = licensing.get_saved_license_info()
     except Exception:
+        license_info = None
+
+    if license_info is None:
         activation_dialog = ActivationDialog()
         if activation_dialog.exec() != QDialog.Accepted:
             return
