@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QDialog,
@@ -21,6 +22,9 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListView,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -33,6 +37,18 @@ from PySide6.QtWidgets import (
 )
 
 import app as scheduler
+import licensing
+
+
+class ScrollableComboBox(QComboBox):
+    def __init__(self, max_visible_items: int = 8, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setMaxVisibleItems(max_visible_items)
+        self.setStyleSheet("QComboBox { combobox-popup: 0; }")
+
+        popup_view = QListView(self)
+        popup_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setView(popup_view)
 
 
 class FacebookAppSettingsDialog(QDialog):
@@ -85,7 +101,7 @@ class SelectFacebookPageDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        self.page_input = QComboBox()
+        self.page_input = ScrollableComboBox()
         for page in pages:
             self.page_input.addItem(page.label)
         layout.addWidget(self.page_input)
@@ -100,6 +116,136 @@ class SelectFacebookPageDialog(QDialog):
         return self.pages[self.page_input.currentIndex()]
 
 
+class SelectSchedulePagesDialog(QDialog):
+    def __init__(
+        self,
+        pages: list[scheduler.FacebookPageConfig],
+        selected_page_keys: set[str],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+
+        self.pages = pages
+        self.setWindowTitle("Choose Facebook Pages")
+        self.resize(620, 520)
+
+        layout = QVBoxLayout(self)
+
+        self.page_list = QListWidget()
+        self.page_list.setUniformItemSizes(True)
+        self.page_list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.page_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        for page in pages:
+            item = QListWidgetItem(page.label)
+            item.setData(Qt.UserRole, page.key)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if page.key in selected_page_keys else Qt.Unchecked)
+            self.page_list.addItem(item)
+        layout.addWidget(self.page_list, 1)
+
+        selection_row = QHBoxLayout()
+        select_all_button = QPushButton("Select All")
+        select_all_button.clicked.connect(lambda: self.set_all_pages_checked(True))
+        selection_row.addWidget(select_all_button)
+
+        clear_button = QPushButton("Clear")
+        clear_button.clicked.connect(lambda: self.set_all_pages_checked(False))
+        selection_row.addWidget(clear_button)
+        selection_row.addStretch(1)
+        layout.addLayout(selection_row)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Use Selected Pages")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def set_all_pages_checked(self, checked: bool) -> None:
+        check_state = Qt.Checked if checked else Qt.Unchecked
+        for index in range(self.page_list.count()):
+            self.page_list.item(index).setCheckState(check_state)
+
+    def selected_page_keys(self) -> set[str]:
+        page_keys = set()
+        for index in range(self.page_list.count()):
+            item = self.page_list.item(index)
+            if item.checkState() == Qt.Checked:
+                page_keys.add(str(item.data(Qt.UserRole)))
+
+        return page_keys
+
+
+class ActivationDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.setWindowTitle("Activate Facebook Page Scheduler")
+        self.setMinimumWidth(640)
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("This app is not activated.")
+        title.setStyleSheet("font-size: 18px; font-weight: 700;")
+        layout.addWidget(title)
+
+        layout.addWidget(QLabel("Send this Device ID to the app owner to get a license."))
+
+        device_row = QHBoxLayout()
+        self.device_id_input = QLineEdit(licensing.get_device_id())
+        self.device_id_input.setReadOnly(True)
+        device_row.addWidget(self.device_id_input, 1)
+
+        copy_button = QPushButton("Copy")
+        copy_button.clicked.connect(self.copy_device_id)
+        device_row.addWidget(copy_button)
+        layout.addLayout(device_row)
+
+        layout.addWidget(QLabel("License Key"))
+        self.license_input = QPlainTextEdit()
+        self.license_input.setPlaceholderText("Paste the license key here")
+        self.license_input.setFixedHeight(150)
+        layout.addWidget(self.license_input)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #b91c1c;")
+        layout.addWidget(self.status_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+
+        quit_button = QPushButton("Quit")
+        quit_button.clicked.connect(self.reject)
+        button_row.addWidget(quit_button)
+
+        activate_button = QPushButton("Activate")
+        activate_button.clicked.connect(self.activate)
+        button_row.addWidget(activate_button)
+        layout.addLayout(button_row)
+
+    def copy_device_id(self) -> None:
+        QApplication.clipboard().setText(self.device_id_input.text())
+        self.status_label.setStyleSheet("color: #4b5563;")
+        self.status_label.setText("Device ID copied.")
+
+    def activate(self) -> None:
+        license_token = self.license_input.toPlainText().strip()
+        if not license_token:
+            self.status_label.setStyleSheet("color: #b91c1c;")
+            self.status_label.setText("Paste a license key first.")
+            return
+
+        try:
+            license_info = licensing.save_license(license_token)
+        except Exception as exc:
+            self.status_label.setStyleSheet("color: #b91c1c;")
+            self.status_label.setText(str(exc))
+            return
+
+        self.status_label.setStyleSheet("color: #4b5563;")
+        self.status_label.setText(f"Activated for {license_info.name}.")
+        self.accept()
+
+
 class SchedulerDesktopApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -112,6 +258,7 @@ class SchedulerDesktopApp(QMainWindow):
         self.scheduler_thread: threading.Thread | None = None
         self.worker_running = False
         self.page_configs: list[scheduler.FacebookPageConfig] = []
+        self.selected_page_key_set: set[str] = set()
 
         self.setWindowTitle("Facebook Page Scheduler")
         self.resize(1180, 760)
@@ -153,15 +300,30 @@ class SchedulerDesktopApp(QMainWindow):
         form_layout.setContentsMargins(14, 18, 14, 14)
         form_layout.setSpacing(8)
 
-        form_layout.addWidget(QLabel("Facebook Page"))
+        page_selection_row = QHBoxLayout()
+        page_selection_row.setSpacing(8)
+        form_layout.addWidget(QLabel("Facebook Pages"))
+        self.page_selection_label = QLabel("No pages selected")
+        self.page_selection_label.setStyleSheet("color: #4b5563;")
+        page_selection_row.addWidget(self.page_selection_label, 1)
+
+        self.choose_pages_button = QPushButton("Choose Pages")
+        self.choose_pages_button.clicked.connect(self.choose_schedule_pages)
+        page_selection_row.addWidget(self.choose_pages_button)
+        form_layout.addLayout(page_selection_row)
+
         page_row = QHBoxLayout()
         page_row.setSpacing(8)
-        self.page_input = QComboBox()
-        page_row.addWidget(self.page_input, 1)
 
-        self.connect_facebook_button = QPushButton("Connect Facebook")
+        self.facebook_app_settings_button = QPushButton("App Settings")
+        self.facebook_app_settings_button.setToolTip("Set or change the Meta app ID and client token")
+        self.facebook_app_settings_button.clicked.connect(self.edit_facebook_app_settings)
+        page_row.addWidget(self.facebook_app_settings_button, 1)
+
+        self.connect_facebook_button = QPushButton("Connect Page")
+        self.connect_facebook_button.setToolTip("Connect a Facebook profile and save one of its Pages")
         self.connect_facebook_button.clicked.connect(self.connect_facebook)
-        page_row.addWidget(self.connect_facebook_button)
+        page_row.addWidget(self.connect_facebook_button, 1)
         form_layout.addLayout(page_row)
 
         form_layout.addWidget(QLabel("Message"))
@@ -345,39 +507,87 @@ class SchedulerDesktopApp(QMainWindow):
             header.setSectionResizeMode(column_index, QHeaderView.Interactive)
             self.table.setColumnWidth(column_index, width)
 
-    def load_page_options(self, selected_page_key: str | None = None) -> None:
-        current_page_key = selected_page_key or self.page_input.currentData()
-        self.page_input.clear()
+    def selected_page_keys(self) -> list[str]:
+        return [
+            page.key
+            for page in self.page_configs
+            if page.key in self.selected_page_key_set
+        ]
 
+    def selected_page_labels(self) -> list[str]:
+        return [
+            page.label
+            for page in self.page_configs
+            if page.key in self.selected_page_key_set
+        ]
+
+    def set_page_controls_enabled(self, enabled: bool) -> None:
+        self.choose_pages_button.setEnabled(enabled)
+
+    def set_all_pages_checked(self, checked: bool) -> None:
+        self.selected_page_key_set = {page.key for page in self.page_configs} if checked else set()
+        self.update_page_selection_state()
+
+    def select_all_pages(self) -> None:
+        self.set_all_pages_checked(True)
+
+    def clear_page_selection(self) -> None:
+        self.set_all_pages_checked(False)
+
+    def update_page_selection_state(self) -> None:
+        selected_count = len(self.selected_page_keys())
+        total_count = len(self.page_configs)
+        if total_count == 0:
+            self.page_selection_label.setText("No pages configured")
+            self.page_selection_label.setToolTip("")
+            return
+
+        if selected_count == 0:
+            self.page_selection_label.setText(f"0 of {total_count} selected")
+            self.page_selection_label.setToolTip("")
+            return
+
+        labels = self.selected_page_labels()
+        self.page_selection_label.setText(f"{selected_count} of {total_count} selected")
+        self.page_selection_label.setToolTip("\n".join(labels))
+
+    def choose_schedule_pages(self) -> None:
+        if not self.page_configs:
+            QMessageBox.information(self, "No pages", "Use Connect Page to add a page first.")
+            return
+
+        dialog = SelectSchedulePagesDialog(self.page_configs, self.selected_page_key_set, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.selected_page_key_set = dialog.selected_page_keys()
+        self.update_page_selection_state()
+
+    def load_page_options(self, selected_page_key: str | None = None) -> None:
         try:
             self.page_configs = scheduler.get_facebook_pages()
         except Exception as exc:
             self.page_configs = []
-            self.page_input.addItem("No pages configured", "")
-            self.page_input.setEnabled(False)
+            self.selected_page_key_set = set()
+            self.set_page_controls_enabled(False)
             self.schedule_button.setEnabled(False)
+            self.update_page_selection_state()
             self.set_status(f"Could not load Facebook pages: {exc}", error=True)
             return
 
-        for page in self.page_configs:
-            self.page_input.addItem(page.label, page.key)
+        available_page_keys = {page.key for page in self.page_configs}
+        self.selected_page_key_set &= available_page_keys
+        if selected_page_key and selected_page_key in available_page_keys:
+            self.selected_page_key_set.add(selected_page_key)
+        if not self.selected_page_key_set and self.page_configs:
+            self.selected_page_key_set.add(self.page_configs[0].key)
 
-        if current_page_key:
-            for index in range(self.page_input.count()):
-                if self.page_input.itemData(index) == current_page_key:
-                    self.page_input.setCurrentIndex(index)
-                    break
-
-        self.page_input.setEnabled(True)
+        self.set_page_controls_enabled(True)
         self.schedule_button.setEnabled(True)
+        self.update_page_selection_state()
         self.set_status(f"Loaded {len(self.page_configs)} Facebook page(s).")
 
-    def ensure_facebook_app_config(self) -> scheduler.FacebookAppConfig | None:
-        try:
-            return scheduler.get_facebook_app_config()
-        except Exception:
-            pass
-
+    def prompt_facebook_app_settings(self) -> scheduler.FacebookAppConfig | None:
         dialog = FacebookAppSettingsDialog(self)
         if dialog.exec() != QDialog.Accepted:
             return None
@@ -390,13 +600,30 @@ class SchedulerDesktopApp(QMainWindow):
             self.set_status(f"Could not save Facebook app settings: {exc}", error=True)
             return None
 
+    def ensure_facebook_app_config(self) -> scheduler.FacebookAppConfig | None:
+        try:
+            return scheduler.get_facebook_app_config()
+        except Exception:
+            return self.prompt_facebook_app_settings()
+
+    def edit_facebook_app_settings(self) -> None:
+        app_config = self.prompt_facebook_app_settings()
+        if app_config is None:
+            return
+
+        self.log("Facebook app settings saved.")
+
     def connect_facebook(self) -> None:
         app_config = self.ensure_facebook_app_config()
         if app_config is None:
             return
 
         self.connect_facebook_button.setEnabled(False)
-        self.log("Opening Facebook connection in your browser.")
+        self.facebook_app_settings_button.setEnabled(False)
+        self.log(
+            "Opening Facebook connection. If the wrong profile appears, use a private window "
+            "or switch Facebook accounts before entering the code."
+        )
         threading.Thread(
             target=self.connect_facebook_worker,
             args=(app_config,),
@@ -498,12 +725,13 @@ class SchedulerDesktopApp(QMainWindow):
         message = self.message_input.toPlainText().strip()
         first_comment = self.first_comment_input.toPlainText().strip() or None
         scheduled_at = self.scheduled_at_input.text().strip()
-        page_key = self.page_input.currentData()
+        page_keys = self.selected_page_keys()
+        page_labels = self.selected_page_labels()
         media_paths = self.media_paths_from_input()
         media_path = media_paths if len(media_paths) > 1 else (media_paths[0] if media_paths else None)
 
-        if not page_key:
-            QMessageBox.warning(self, "Missing page", "Use Connect Facebook to add a page first.")
+        if not page_keys:
+            QMessageBox.warning(self, "Missing pages", "Select at least one Facebook Page.")
             return
 
         if not message and not media_paths:
@@ -515,13 +743,17 @@ class SchedulerDesktopApp(QMainWindow):
             media_type = None
 
         try:
-            scheduler.add_post(message, scheduled_at, media_path, media_type, first_comment, page_key)
+            for page_key in page_keys:
+                scheduler.add_post(message, scheduled_at, media_path, media_type, first_comment, page_key)
         except Exception as exc:
             QMessageBox.critical(self, "Could not schedule post", str(exc))
             self.set_status(f"Could not schedule post: {exc}", error=True)
             return
 
-        self.log(f"Post scheduled for {self.page_input.currentText()}.")
+        if len(page_labels) == 1:
+            self.log(f"Post scheduled for {page_labels[0]}.")
+        else:
+            self.log(f"Post scheduled for {len(page_labels)} pages.")
         self.clear_form(keep_time=False)
         self.refresh_posts()
 
@@ -696,13 +928,18 @@ class SchedulerDesktopApp(QMainWindow):
                 self.choose_connected_facebook_page(payload)
             elif event_type == "connect_finished":
                 self.connect_facebook_button.setEnabled(True)
+                self.facebook_app_settings_button.setEnabled(True)
             elif event_type == "device_code" and isinstance(payload, dict):
                 user_code = str(payload.get("user_code", ""))
                 verification_uri = str(payload.get("verification_uri", "https://www.facebook.com/device"))
                 QMessageBox.information(
                     self,
-                    "Connect Facebook",
-                    f"Enter code {user_code} at {verification_uri}.",
+                    "Connect Page",
+                    (
+                        f"Enter code {user_code} at {verification_uri}.\n\n"
+                        "To connect a different Facebook profile, open that link in a private "
+                        "browser window or switch Facebook accounts before entering the code."
+                    ),
                 )
 
     def log(self, message: str) -> None:
@@ -743,6 +980,13 @@ class SchedulerDesktopApp(QMainWindow):
 
 def main() -> None:
     app = QApplication([])
+    try:
+        licensing.get_saved_license_info()
+    except Exception:
+        activation_dialog = ActivationDialog()
+        if activation_dialog.exec() != QDialog.Accepted:
+            return
+
     window = SchedulerDesktopApp()
     window.show()
     app.exec()

@@ -67,7 +67,7 @@ PAGE_2_ID=987654321098765
 PAGE_2_ACCESS_TOKEN=EAAB...
 ```
 
-The desktop app shows these pages in a page picker. In the CLI, pass `--page main`, `--page shop`, or another configured key/name/page ID.
+The desktop app lets you choose pages from a checkable **Choose Pages** dialog, so one scheduled post can target one page, several pages, or all pages. In the CLI, pass `--page main`, `--page shop`, or another configured key/name/page ID.
 
 If your first page still uses the original `PAGE_ID` and `PAGE_ACCESS_TOKEN` names, you can label it with `PAGE_1_KEY` and `PAGE_1_NAME`. Add additional pages with `PAGE_2_ID`, `PAGE_2_ACCESS_TOKEN`, and so on.
 
@@ -84,7 +84,9 @@ python desktop.py
 On macOS, you can also double-click `run_desktop.command`.
 On Windows, you can double-click `run_desktop.bat`.
 
-Use **Connect Facebook** beside the Facebook Page picker to log in, select a Page, and save its Page access token automatically.
+Use **Connect Page** beside the Facebook Pages selector to log in, select a Page, and save its Page access token automatically.
+
+To add Pages from another Facebook profile, click **Connect Page** again and use the Facebook account that manages those Pages when the browser/device-code login opens. If the browser opens the wrong Facebook profile, open `https://www.facebook.com/device` in a private window or another browser, then enter the code shown by the app. The same Meta app ID and client token can be used for multiple Facebook profiles as long as the app has the required approved permissions. If you need to change the Meta app credentials, use **App Settings**.
 
 ## Build Desktop App
 Build Windows packages on Windows and macOS packages on macOS:
@@ -95,6 +97,25 @@ python -m PyInstaller --noconfirm --clean --windowed --name FacebookPageSchedule
 ```
 
 Send the generated `dist/FacebookPageScheduler` folder on Windows or `dist/FacebookPageScheduler.app` on macOS. On first launch, the app creates a blank writable `.env` for that user and saves tokens there through the UI.
+
+## Offline Licenses
+The desktop app is locked until it has a signed license for the current computer.
+
+Create your private/public key pair once:
+
+```bash
+python license_tool.py init-keys
+```
+
+Keep `license_private_key.pem` private. Do not send it with the app. The generated `license_public_key.py` is safe to ship and is used by the app to verify licenses.
+
+When a user opens the app, it shows a Device ID. Generate a license for that Device ID:
+
+```bash
+python license_tool.py create --name "Friend Name" --device-id DEVICE-ID-HERE --expires 2026-12-31
+```
+
+Send the generated license text to the user. They paste it into the activation window, and the app saves it locally in their app data folder.
 
 ## Add A Post
 ```bash
