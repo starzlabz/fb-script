@@ -15,6 +15,7 @@ import licensing
 
 DEFAULT_PRIVATE_KEY_PATH = "license_private_key.pem"
 DEFAULT_PUBLIC_MODULE_PATH = "license_public_key.py"
+DEFAULT_LICENSE_LOG_PATH = os.path.join("licenses", "issued_licenses.jsonl")
 
 
 def load_private_key(private_key_path: str) -> Ed25519PrivateKey:
@@ -96,7 +97,72 @@ def create_license(args: argparse.Namespace) -> None:
             f.write(license_token)
             f.write("\n")
 
+    if args.log:
+        append_license_log(args.log, payload, license_token, args.output)
+
     print(license_token)
+
+
+def append_license_log(
+    log_path: str,
+    payload: dict[str, object],
+    license_token: str,
+    output_path: str | None,
+) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(log_path)), exist_ok=True)
+    record = {
+        **payload,
+        "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "license": license_token,
+        "output": output_path,
+    }
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, sort_keys=True))
+        f.write("\n")
+
+
+def load_license_log(log_path: str) -> list[dict[str, object]]:
+    records = []
+    if not os.path.exists(log_path):
+        return records
+
+    with open(log_path, "r", encoding="utf-8") as f:
+        for line_number, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"Skipping invalid log line {line_number}.")
+                continue
+
+            if isinstance(record, dict):
+                records.append(record)
+
+    return records
+
+
+def list_licenses(args: argparse.Namespace) -> None:
+    records = load_license_log(args.log)
+    if not records:
+        print(f"No licenses found in {args.log}.")
+        return
+
+    if args.full:
+        print(json.dumps(records, indent=2, sort_keys=True))
+        return
+
+    print(f"{'Issued':<19} {'Name':<24} {'Expires':<12} {'Device ID':<24} License ID")
+    print("-" * 100)
+    for record in records:
+        created_at = str(record.get("created_at", ""))[:19]
+        name = str(record.get("name", ""))[:24]
+        expires_at = str(record.get("expires_at") or "never")[:12]
+        device_id = str(record.get("device_id", ""))[:24]
+        license_id = str(record.get("license_id", ""))
+        print(f"{created_at:<19} {name:<24} {expires_at:<12} {device_id:<24} {license_id}")
 
 
 def show_device_id(_: argparse.Namespace) -> None:
@@ -120,10 +186,20 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--expires", help="Optional expiration date in YYYY-MM-DD format.")
     create_parser.add_argument("--license-id", help="Optional custom license ID.")
     create_parser.add_argument("--output", help="Optional file path to write the license token.")
+    create_parser.add_argument(
+        "--log",
+        default=DEFAULT_LICENSE_LOG_PATH,
+        help="License history path. Use --log '' to skip logging.",
+    )
     create_parser.set_defaults(func=create_license)
 
     device_parser = subparsers.add_parser("device-id", help="Print this computer's Device ID.")
     device_parser.set_defaults(func=show_device_id)
+
+    list_parser = subparsers.add_parser("list", help="List generated licenses from the local log.")
+    list_parser.add_argument("--log", default=DEFAULT_LICENSE_LOG_PATH)
+    list_parser.add_argument("--full", action="store_true", help="Print full JSON records.")
+    list_parser.set_defaults(func=list_licenses)
 
     return parser
 
