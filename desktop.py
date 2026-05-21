@@ -246,6 +246,38 @@ class ActivationDialog(QDialog):
         self.accept()
 
 
+class ErrorDetailsDialog(QDialog):
+    def __init__(self, post_id: int, error_message: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.error_message = error_message
+        self.setWindowTitle(f"Post {post_id} Error")
+        self.resize(760, 460)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(f"Full error for post {post_id}"))
+
+        self.error_output = QPlainTextEdit(error_message)
+        self.error_output.setReadOnly(True)
+        self.error_output.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        layout.addWidget(self.error_output, 1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+
+        copy_button = QPushButton("Copy")
+        copy_button.clicked.connect(self.copy_error)
+        button_row.addWidget(copy_button)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+    def copy_error(self) -> None:
+        QApplication.clipboard().setText(self.error_message)
+
+
 class SchedulerDesktopApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -425,6 +457,10 @@ class SchedulerDesktopApp(QMainWindow):
         retry_button.clicked.connect(self.retry_selected)
         table_toolbar.addWidget(retry_button)
 
+        view_error_button = QPushButton("View Error")
+        view_error_button.clicked.connect(self.view_selected_error)
+        table_toolbar.addWidget(view_error_button)
+
         delete_button = QPushButton("Delete")
         delete_button.clicked.connect(self.delete_selected)
         table_toolbar.addWidget(delete_button)
@@ -449,6 +485,7 @@ class SchedulerDesktopApp(QMainWindow):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(False)
+        self.table.cellDoubleClicked.connect(self.view_error_from_cell)
         self.configure_posts_table_columns()
         right_layout.addWidget(self.table, 1)
 
@@ -810,6 +847,41 @@ class SchedulerDesktopApp(QMainWindow):
 
         self.log(f"Post {post_id} marked for retry.")
         self.refresh_posts()
+
+    def selected_post_error(self) -> tuple[int, str] | None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Select a post", "Select a post first.")
+            return None
+
+        id_item = self.table.item(row, 0)
+        error_item = self.table.item(row, 10)
+        if id_item is None or error_item is None:
+            return None
+
+        post_id = int(id_item.data(Qt.UserRole))
+        error_message = error_item.text().strip()
+        if not error_message:
+            QMessageBox.information(self, "No error", "The selected post has no error message.")
+            return None
+
+        return post_id, error_message
+
+    def view_selected_error(self) -> None:
+        selected_error = self.selected_post_error()
+        if selected_error is None:
+            return
+
+        post_id, error_message = selected_error
+        dialog = ErrorDetailsDialog(post_id, error_message, self)
+        dialog.exec()
+
+    def view_error_from_cell(self, row: int, column: int) -> None:
+        if column != 10:
+            return
+
+        self.table.selectRow(row)
+        self.view_selected_error()
 
     def refresh_posts(self) -> None:
         try:
