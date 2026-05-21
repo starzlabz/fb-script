@@ -7,11 +7,12 @@ import time
 import webbrowser
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -113,6 +114,31 @@ class SelectFacebookPageDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def selected_page(self) -> scheduler.FacebookConnectedPage:
+        return self.pages[self.page_input.currentIndex()]
+
+
+class RemoveFacebookPageDialog(QDialog):
+    def __init__(self, pages: list[scheduler.FacebookPageConfig], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        self.pages = pages
+        self.setWindowTitle("Remove Facebook Page")
+        self.setMinimumWidth(520)
+
+        layout = QVBoxLayout(self)
+
+        self.page_input = ScrollableComboBox()
+        for page in pages:
+            self.page_input.addItem(page.label)
+        layout.addWidget(self.page_input)
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        self.buttons.button(QDialogButtonBox.Ok).setText("Remove Page")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+    def selected_page(self) -> scheduler.FacebookPageConfig:
         return self.pages[self.page_input.currentIndex()]
 
 
@@ -356,6 +382,11 @@ class SchedulerDesktopApp(QMainWindow):
         self.connect_facebook_button.setToolTip("Connect a Facebook profile and save one of its Pages")
         self.connect_facebook_button.clicked.connect(self.connect_facebook)
         page_row.addWidget(self.connect_facebook_button, 1)
+
+        self.remove_facebook_button = QPushButton("Remove Page")
+        self.remove_facebook_button.setToolTip("Remove one saved Facebook Page from this app")
+        self.remove_facebook_button.clicked.connect(self.remove_facebook_page)
+        page_row.addWidget(self.remove_facebook_button, 1)
         form_layout.addLayout(page_row)
 
         form_layout.addWidget(QLabel("Message"))
@@ -371,19 +402,48 @@ class SchedulerDesktopApp(QMainWindow):
         form_layout.addWidget(self.first_comment_input)
 
         form_layout.addWidget(QLabel("Scheduled At"))
+        schedule_picker_row = QHBoxLayout()
+        schedule_picker_row.setSpacing(8)
+
+        default_schedule_at = self.default_schedule_datetime()
+        self.scheduled_date_input = QDateEdit(default_schedule_at.date())
+        self.scheduled_date_input.setCalendarPopup(True)
+        self.scheduled_date_input.setDisplayFormat("MMM d, yyyy")
+        self.scheduled_date_input.setToolTip("Pick the local date to publish")
+        self.scheduled_date_input.setMinimumHeight(34)
+        schedule_picker_row.addWidget(self.scheduled_date_input, 3)
+
+        self.scheduled_time_input = ScrollableComboBox(max_visible_items=12)
+        self.scheduled_time_input.setToolTip("Pick the local time to publish")
+        self.scheduled_time_input.setMinimumHeight(34)
+        self.scheduled_time_input.setEditable(True)
+        self.scheduled_time_input.setInsertPolicy(QComboBox.NoInsert)
+        self.populate_schedule_time_options()
+        if self.scheduled_time_input.lineEdit():
+            self.scheduled_time_input.lineEdit().setPlaceholderText("HH:mm")
+            self.scheduled_time_input.lineEdit().editingFinished.connect(self.normalize_schedule_time_input)
+        schedule_picker_row.addWidget(self.scheduled_time_input, 2)
+
+        form_layout.addLayout(schedule_picker_row)
+        self.set_schedule_datetime(default_schedule_at)
+
         schedule_row = QHBoxLayout()
         schedule_row.setSpacing(8)
-        self.scheduled_at_input = QLineEdit(self.default_schedule_time())
-        self.scheduled_at_input.setPlaceholderText("YYYY-MM-DD HH:MM:SS")
-        schedule_row.addWidget(self.scheduled_at_input, 1)
+        now_button = QPushButton("Now")
+        now_button.clicked.connect(self.set_now)
+        schedule_row.addWidget(now_button, 1)
+
+        thirty_minutes_button = QPushButton("+30 Min")
+        thirty_minutes_button.clicked.connect(self.set_thirty_minutes_later)
+        schedule_row.addWidget(thirty_minutes_button, 1)
 
         one_hour_button = QPushButton("+1 Hour")
         one_hour_button.clicked.connect(self.set_one_hour_later)
-        schedule_row.addWidget(one_hour_button)
+        schedule_row.addWidget(one_hour_button, 1)
 
-        now_button = QPushButton("Now")
-        now_button.clicked.connect(self.set_now)
-        schedule_row.addWidget(now_button)
+        one_day_button = QPushButton("+1 Day")
+        one_day_button.clicked.connect(self.set_one_day_later)
+        schedule_row.addWidget(one_day_button, 1)
         form_layout.addLayout(schedule_row)
 
         form_layout.addWidget(QLabel("Media Paths or URLs"))
@@ -503,22 +563,106 @@ class SchedulerDesktopApp(QMainWindow):
         self.status_label.setStyleSheet("color: #4b5563;")
         main_layout.addWidget(self.status_label)
 
-    def default_schedule_time(self) -> str:
-        return (datetime.now() + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    def default_schedule_datetime(self) -> QDateTime:
+        default_time = (datetime.now() + timedelta(hours=1)).replace(second=0, microsecond=0)
+        default_time += timedelta(minutes=(15 - default_time.minute % 15) % 15)
+        return QDateTime.fromString(default_time.strftime("%Y-%m-%d %H:%M:%S"), "yyyy-MM-dd HH:mm:ss")
+
+    def populate_schedule_time_options(self) -> None:
+        for hour in range(24):
+            for minute in (0, 15, 30, 45):
+                schedule_time = QTime(hour, minute)
+                self.scheduled_time_input.addItem(schedule_time.toString("HH:mm"), schedule_time)
+
+    def selected_schedule_time(self) -> QTime:
+        schedule_time = self.parse_schedule_time(self.scheduled_time_input.currentText())
+        if schedule_time:
+            return schedule_time
+
+        raise ValueError("Enter time in 24-hour format, for example 09:05 or 21:37.")
+
+    def parse_schedule_time(self, value: str) -> QTime | None:
+        value = value.strip()
+        if not value:
+            return None
+
+        for time_format in ("HH:mm", "H:mm"):
+            schedule_time = QTime.fromString(value, time_format)
+            if schedule_time.isValid():
+                return schedule_time
+
+        return None
+
+    def schedule_datetime(self) -> QDateTime:
+        return QDateTime(self.scheduled_date_input.date(), self.selected_schedule_time())
+
+    def schedule_datetime_for_adjustment(self) -> QDateTime:
+        try:
+            return self.schedule_datetime()
+        except ValueError:
+            return QDateTime.currentDateTime()
+
+    def set_schedule_datetime(self, schedule_datetime: QDateTime) -> None:
+        if not schedule_datetime.isValid():
+            schedule_datetime = QDateTime.currentDateTime()
+
+        self.scheduled_date_input.setDate(schedule_datetime.date())
+        self.set_schedule_time(schedule_datetime.time())
+
+    def set_schedule_time(self, schedule_time: QTime) -> None:
+        schedule_time = QTime(schedule_time.hour(), schedule_time.minute())
+        schedule_time_index = self.find_schedule_time_index(schedule_time)
+        if schedule_time_index == -1:
+            schedule_time_index = self.schedule_time_insert_index(schedule_time)
+            self.scheduled_time_input.insertItem(
+                schedule_time_index,
+                schedule_time.toString("HH:mm"),
+                schedule_time,
+            )
+
+        self.scheduled_time_input.setCurrentIndex(schedule_time_index)
+
+    def normalize_schedule_time_input(self) -> None:
+        schedule_time = self.parse_schedule_time(self.scheduled_time_input.currentText())
+        if schedule_time:
+            self.set_schedule_time(schedule_time)
+
+    def find_schedule_time_index(self, schedule_time: QTime) -> int:
+        for index in range(self.scheduled_time_input.count()):
+            item_time = self.scheduled_time_input.itemData(index, Qt.UserRole)
+            if isinstance(item_time, QTime) and item_time == schedule_time:
+                return index
+
+        return -1
+
+    def schedule_time_insert_index(self, schedule_time: QTime) -> int:
+        start_of_day = QTime(0, 0)
+        schedule_seconds = start_of_day.secsTo(schedule_time)
+
+        for index in range(self.scheduled_time_input.count()):
+            item_time = self.scheduled_time_input.itemData(index, Qt.UserRole)
+            if not isinstance(item_time, QTime):
+                continue
+
+            if start_of_day.secsTo(item_time) > schedule_seconds:
+                return index
+
+        return self.scheduled_time_input.count()
+
+    def scheduled_at_text(self) -> str:
+        return self.schedule_datetime().toString("yyyy-MM-dd HH:mm:ss")
+
+    def set_thirty_minutes_later(self) -> None:
+        self.set_schedule_datetime(self.schedule_datetime_for_adjustment().addSecs(30 * 60))
 
     def set_one_hour_later(self) -> None:
-        scheduled_at = self.scheduled_at_input.text().strip()
-        try:
-            base_time = datetime.strptime(scheduled_at, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            base_time = datetime.now()
+        self.set_schedule_datetime(self.schedule_datetime_for_adjustment().addSecs(60 * 60))
 
-        self.scheduled_at_input.setText(
-            (base_time + timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-        )
+    def set_one_day_later(self) -> None:
+        self.set_schedule_datetime(self.schedule_datetime_for_adjustment().addDays(1))
 
     def set_now(self) -> None:
-        self.scheduled_at_input.setText(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        self.set_schedule_datetime(QDateTime.currentDateTime())
 
     def configure_posts_table_columns(self) -> None:
         header = self.table.horizontalHeader()
@@ -560,6 +704,7 @@ class SchedulerDesktopApp(QMainWindow):
 
     def set_page_controls_enabled(self, enabled: bool) -> None:
         self.choose_pages_button.setEnabled(enabled)
+        self.remove_facebook_button.setEnabled(enabled and bool(self.page_configs))
 
     def set_all_pages_checked(self, checked: bool) -> None:
         self.selected_page_key_set = {page.key for page in self.page_configs} if checked else set()
@@ -604,12 +749,21 @@ class SchedulerDesktopApp(QMainWindow):
         try:
             self.page_configs = scheduler.get_facebook_pages()
         except Exception as exc:
+            if "No Facebook pages configured" not in str(exc):
+                self.page_configs = []
+                self.selected_page_key_set = set()
+                self.set_page_controls_enabled(False)
+                self.schedule_button.setEnabled(False)
+                self.update_page_selection_state()
+                self.set_status(f"Could not load Facebook pages: {exc}", error=True)
+                return
+
             self.page_configs = []
             self.selected_page_key_set = set()
             self.set_page_controls_enabled(False)
             self.schedule_button.setEnabled(False)
             self.update_page_selection_state()
-            self.set_status(f"Could not load Facebook pages: {exc}", error=True)
+            self.set_status("No Facebook pages configured. Use Connect Page to add one.")
             return
 
         available_page_keys = {page.key for page in self.page_configs}
@@ -623,6 +777,40 @@ class SchedulerDesktopApp(QMainWindow):
         self.schedule_button.setEnabled(True)
         self.update_page_selection_state()
         self.set_status(f"Loaded {len(self.page_configs)} Facebook page(s).")
+
+    def remove_facebook_page(self) -> None:
+        if not self.page_configs:
+            QMessageBox.information(self, "No pages", "There are no saved Facebook Pages to remove.")
+            return
+
+        dialog = RemoveFacebookPageDialog(self.page_configs, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        page = dialog.selected_page()
+        answer = QMessageBox.question(
+            self,
+            "Remove Facebook Page",
+            (
+                f"Remove {page.name} from this app?\n\n"
+                "Scheduled posts already created for this Page will stay in the posts list, "
+                "but they cannot publish until the Page is connected again."
+            ),
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            removed_page = scheduler.remove_facebook_page_from_env(page.key)
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not remove page", str(exc))
+            self.set_status(f"Could not remove page: {exc}", error=True)
+            return
+
+        self.selected_page_key_set.discard(removed_page.key)
+        self.log(f"Removed Facebook Page: {removed_page.label}.")
+        self.load_page_options()
+        self.refresh_posts()
 
     def prompt_facebook_app_settings(self) -> scheduler.FacebookAppConfig | None:
         dialog = FacebookAppSettingsDialog(self)
@@ -761,7 +949,6 @@ class SchedulerDesktopApp(QMainWindow):
     def schedule_post(self) -> None:
         message = self.message_input.toPlainText().strip()
         first_comment = self.first_comment_input.toPlainText().strip() or None
-        scheduled_at = self.scheduled_at_input.text().strip()
         page_keys = self.selected_page_keys()
         page_labels = self.selected_page_labels()
         media_paths = self.media_paths_from_input()
@@ -773,6 +960,13 @@ class SchedulerDesktopApp(QMainWindow):
 
         if not message and not media_paths:
             QMessageBox.warning(self, "Missing content", "Add a message or choose media.")
+            return
+
+        try:
+            scheduled_at = self.scheduled_at_text()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid time", str(exc))
+            self.set_status(str(exc), error=True)
             return
 
         media_type = self.media_type_input.currentText().strip().lower()

@@ -1,4 +1,5 @@
 import os
+import random
 import sys
 import json
 import time
@@ -52,6 +53,8 @@ DEFAULT_FACEBOOK_LOGIN_SCOPES = [
     "pages_read_engagement",
     "pages_manage_posts",
 ]
+PUBLISH_DELAY_MIN_SECONDS = 10
+PUBLISH_DELAY_MAX_SECONDS = 30
 DEFAULT_ENV_TEMPLATE = """# Facebook Page Scheduler local configuration
 # The desktop app writes Facebook settings and page tokens here.
 
@@ -338,6 +341,33 @@ def set_env_values(values: dict[str, str], env_path: Optional[str] = None) -> No
         os.environ[key] = value.strip()
 
 
+def remove_env_keys(keys: set[str], env_path: Optional[str] = None) -> None:
+    env_path = ensure_env_file(env_path)
+    existing_lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            existing_lines = f.read().splitlines()
+
+    updated_lines = []
+    for line in existing_lines:
+        stripped_line = line.strip()
+        if not stripped_line or stripped_line.startswith("#") or "=" not in line:
+            updated_lines.append(line)
+            continue
+
+        key, _ = line.split("=", 1)
+        if key.strip() not in keys:
+            updated_lines.append(line)
+
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(updated_lines))
+        if updated_lines:
+            f.write("\n")
+
+    for key in keys:
+        os.environ.pop(key, None)
+
+
 def save_facebook_app_config(
     app_id: str,
     client_token: str,
@@ -486,6 +516,39 @@ def save_connected_facebook_page_to_env(
         page_access_token,
         env_path=env_path,
     )
+
+
+def remove_facebook_page_from_env(
+    page_key: str,
+    env_path: Optional[str] = None,
+) -> FacebookPageConfig:
+    load_env_file(env_path)
+
+    page_config = get_facebook_config(page_key)
+    keys_to_remove = set()
+
+    if get_optional_env("PAGE_ID") == page_config.page_id:
+        keys_to_remove.update({"PAGE_KEY", "PAGE_NAME", "PAGE_ID", "PAGE_ACCESS_TOKEN"})
+        if not get_optional_env("PAGE_1_ID"):
+            keys_to_remove.update({"PAGE_1_KEY", "PAGE_1_NAME"})
+    else:
+        for number in get_indexed_page_numbers():
+            prefix = f"PAGE_{number}"
+            if get_optional_env(f"{prefix}_ID") == page_config.page_id:
+                keys_to_remove.update({
+                    f"{prefix}_KEY",
+                    f"{prefix}_NAME",
+                    f"{prefix}_ID",
+                    f"{prefix}_ACCESS_TOKEN",
+                    f"{prefix}_GRAPH_API_VERSION",
+                })
+                break
+
+    if not keys_to_remove:
+        raise ValueError(f"Could not find saved settings for Facebook page '{page_key}'")
+
+    remove_env_keys(keys_to_remove, env_path)
+    return page_config
 
 
 def get_facebook_pages() -> list[FacebookPageConfig]:
@@ -1367,7 +1430,7 @@ def publish_post_with_first_comment(post: sqlite3.Row) -> tuple[bool, str, Optio
 
     facebook_post_id = post_result
     if not first_comment or post["facebook_comment_id"]:
-        return True, facebook_post_id, post["facebook_comment_id"], None
+        return True, facebook_post_id, facebook_post_id, post["facebook_comment_id"]
 
     comment_success, comment_result = publish_first_comment_to_facebook(
         facebook_post_id,
@@ -1377,7 +1440,7 @@ def publish_post_with_first_comment(post: sqlite3.Row) -> tuple[bool, str, Optio
     if not comment_success:
         return False, comment_result, facebook_post_id, None
 
-    return True, facebook_post_id, comment_result, None
+    return True, facebook_post_id, facebook_post_id, comment_result
 
 
 def run_scheduler() -> None:
@@ -1392,22 +1455,42 @@ def run_scheduler() -> None:
         time.sleep(interval)
 
 
+def publish_post_with_retry(
+    post: sqlite3.Row,
+    log=print,
+) -> tuple[bool, str, Optional[str], Optional[str]]:
+    post_id = post["id"]
+
+    for attempt in range(1, 3):
+        try:
+            success, result, facebook_post_id, facebook_comment_id = publish_post_with_first_comment(post)
+        except Exception as e:
+            success = False
+            result = str(e)
+            facebook_post_id = None
+            facebook_comment_id = None
+
+        if success or facebook_post_id:
+            return success, result, facebook_post_id, facebook_comment_id
+
+        if attempt == 1:
+            log(f"Post ID {post_id} failed: {result}")
+            log(f"Retrying post ID {post_id} one more time...")
+
+    return success, result, facebook_post_id, facebook_comment_id
+
+
 def publish_due_posts_once(log=print) -> int:
     due_posts = get_due_posts()
 
     if due_posts:
         log(f"Found {len(due_posts)} due post(s)")
 
-    for post in due_posts:
+    for index, post in enumerate(due_posts):
         page_label = post["page_name"] or post["page_key"] or "default page"
         log(f"Publishing post ID {post['id']} to {page_label}...")
 
-        try:
-            success, result, facebook_post_id, facebook_comment_id = publish_post_with_first_comment(post)
-        except Exception as e:
-            mark_post_failed(post["id"], str(e))
-            log(f"Failed: {e}")
-            continue
+        success, result, facebook_post_id, facebook_comment_id = publish_post_with_retry(post, log)
 
         if success:
             mark_post_success(post["id"], facebook_post_id, facebook_comment_id)
@@ -1420,6 +1503,11 @@ def publish_due_posts_once(log=print) -> int:
         else:
             mark_post_failed(post["id"], result)
             log(f"Failed: {result}")
+
+        if index < len(due_posts) - 1:
+            delay_seconds = random.randint(PUBLISH_DELAY_MIN_SECONDS, PUBLISH_DELAY_MAX_SECONDS)
+            log(f"Waiting {delay_seconds} seconds before the next post...")
+            time.sleep(delay_seconds)
 
     return len(due_posts)
 
