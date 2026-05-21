@@ -7,7 +7,7 @@ import time
 import webbrowser
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import QDateTime, Qt, QTime, QTimer
+from PySide6.QtCore import QDateTime, QEvent, QObject, Qt, QTime, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -41,7 +41,49 @@ import app as scheduler
 import licensing
 
 
-class ScrollableComboBox(QComboBox):
+class NoWheelDateEdit(QDateEdit):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.installEventFilter(self)
+        self.lineEdit().installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Wheel:
+            event.accept()
+            return True
+
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event) -> None:
+        event.accept()
+
+
+class NoWheelComboBox(QComboBox):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.installEventFilter(self)
+
+    def setEditable(self, editable: bool) -> None:
+        super().setEditable(editable)
+        self.install_line_edit_wheel_filter()
+
+    def install_line_edit_wheel_filter(self) -> None:
+        line_edit = self.lineEdit()
+        if line_edit:
+            line_edit.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Wheel:
+            event.accept()
+            return True
+
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event) -> None:
+        event.accept()
+
+
+class ScrollableComboBox(NoWheelComboBox):
     def __init__(self, max_visible_items: int = 8, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMaxVisibleItems(max_visible_items)
@@ -406,7 +448,7 @@ class SchedulerDesktopApp(QMainWindow):
         schedule_picker_row.setSpacing(8)
 
         default_schedule_at = self.default_schedule_datetime()
-        self.scheduled_date_input = QDateEdit(default_schedule_at.date())
+        self.scheduled_date_input = NoWheelDateEdit(default_schedule_at.date())
         self.scheduled_date_input.setCalendarPopup(True)
         self.scheduled_date_input.setDisplayFormat("MMM d, yyyy")
         self.scheduled_date_input.setToolTip("Pick the local date to publish")
@@ -460,7 +502,7 @@ class SchedulerDesktopApp(QMainWindow):
         form_layout.addLayout(media_row)
 
         form_layout.addWidget(QLabel("Media Type"))
-        self.media_type_input = QComboBox()
+        self.media_type_input = NoWheelComboBox()
         self.media_type_input.addItems(["Auto", "Image", "Video"])
         form_layout.addWidget(self.media_type_input)
 
