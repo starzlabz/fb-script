@@ -55,6 +55,8 @@ DEFAULT_FACEBOOK_LOGIN_SCOPES = [
 ]
 PUBLISH_DELAY_MIN_SECONDS = 10
 PUBLISH_DELAY_MAX_SECONDS = 30
+FIRST_COMMENT_DELAY_MIN_SECONDS = 3
+FIRST_COMMENT_DELAY_MAX_SECONDS = 7
 DEFAULT_ENV_TEMPLATE = """# Facebook Page Scheduler local configuration
 # The desktop app writes Facebook settings and page tokens here.
 
@@ -1409,9 +1411,13 @@ def publish_to_facebook(
     return False, f"Unsupported media type: {media_type}"
 
 
-def publish_post_with_first_comment(post: sqlite3.Row) -> tuple[bool, str, Optional[str], Optional[str]]:
+def publish_post_with_first_comment(
+    post: sqlite3.Row,
+    log=print,
+) -> tuple[bool, str, Optional[str], Optional[str]]:
     first_comment = post["first_comment"]
     facebook_post_id = post["facebook_post_id"]
+    published_post_now = not facebook_post_id
     page_config = get_facebook_config(post["page_key"])
 
     if facebook_post_id:
@@ -1431,6 +1437,11 @@ def publish_post_with_first_comment(post: sqlite3.Row) -> tuple[bool, str, Optio
     facebook_post_id = post_result
     if not first_comment or post["facebook_comment_id"]:
         return True, facebook_post_id, facebook_post_id, post["facebook_comment_id"]
+
+    if published_post_now:
+        delay_seconds = random.randint(FIRST_COMMENT_DELAY_MIN_SECONDS, FIRST_COMMENT_DELAY_MAX_SECONDS)
+        log(f"Waiting {delay_seconds} seconds before publishing the first comment...")
+        time.sleep(delay_seconds)
 
     comment_success, comment_result = publish_first_comment_to_facebook(
         facebook_post_id,
@@ -1463,7 +1474,7 @@ def publish_post_with_retry(
 
     for attempt in range(1, 3):
         try:
-            success, result, facebook_post_id, facebook_comment_id = publish_post_with_first_comment(post)
+            success, result, facebook_post_id, facebook_comment_id = publish_post_with_first_comment(post, log)
         except Exception as e:
             success = False
             result = str(e)
